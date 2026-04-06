@@ -1,0 +1,64 @@
+# PHANTOM R3 — Encrypt Audio Service
+# =============================================================================
+# Systemd service unit for automatic post-recording encryption.
+#
+# This service is triggered by phantom_record.service (or a timer) and runs
+# encrypt_audio.sh to encrypt all pending .opus files in /tmp/phantom/.
+#
+# Install:
+#   sudo cp phantom_encrypt.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable phantom_encrypt.service
+#   sudo systemctl start  phantom_encrypt.service
+# =============================================================================
+
+[Unit]
+Description=PHANTOM R3 Audio Encryption (Opus → TrueCrypt)
+Documentation=file:///phantom/scripts/README_encrypt.md
+# Start after network is up and local filesystems are mounted
+After=network.target local-fs.target
+# If a recording service exists, wait for it to finish first
+# After=phantom_record.service
+# Wants=phantom_record.service
+
+[Service]
+Type=oneshot
+
+# Run as root — required by tcplay and mount operations
+User=root
+Group=root
+
+# Working directory
+WorkingDirectory=/phantom/scripts
+
+# Environment: load password from a secure env file (chmod 600)
+# The file should contain a single line: PHANTOM_PASSWORD=your_password_here
+EnvironmentFile=-/phantom/.env
+
+# Main command
+ExecStart=/bin/bash /phantom/scripts/encrypt_audio.sh
+
+# Standard output → systemd journal AND log file (via Python logging)
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=phantom-encrypt
+
+# Security hardening
+NoNewPrivileges=false
+PrivateTmp=false
+ProtectSystem=false
+ProtectHome=false
+
+# Restart policy: do NOT restart automatically on failure
+# (Operator should investigate logs before retrying)
+Restart=no
+
+# Timeout: allow up to 30 minutes for large batches
+TimeoutStartSec=1800
+TimeoutStopSec=60
+
+# Resource limits
+LimitNOFILE=1024
+
+[Install]
+WantedBy=multi-user.target

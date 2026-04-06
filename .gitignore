@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.env
+venv/
+.venv/
+
+# Phantom secrets — NEVER commit passwords or encrypted data
+.secret
+*.tc
+*.bin
+/phantom/encrypted/
+/phantom/logs/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Audio recordings — raw unencrypted files must never be committed
+*.opus
+*.wav
+*.mp3
+*.flac
+*.m4a
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo

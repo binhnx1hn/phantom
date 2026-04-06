@@ -1,0 +1,170 @@
+Mắt là trong cái buổi demo này, là sẽ dùng một cái điện thoại, chạy qua IPK
+Kết nối với 2 cái kết bị, 2 cái kết bị thì hình dạng nó sẽ trông kiểu như thế này
+Bên trong nó sẽ là một cái mạch ESP32
+hoặc là Raspberry PI-0W
+Nó với những vụ là một là nó ghi âm
+Một là nó ghi âm, hai là nó chưa vai
+Nhưng mà giữa cái kết bị thứ nhất này với kết bị thứ hai này
+nó sai với nhau qua Wi-Fi 2.4 nhưng mà phải ẩn
+Thì phải xem xem là nó có phát được Wi-Fi và nó thu được Wi-Fi nhưng mà ẩn không
+Thu phát và ẩn nha
+Nó thu phát ẩn trong thì ghi dụ copy file vào file vào kết bị thứ nhất
+Thì nó tự đồng bộ sang kết bị thứ hai
+Và Wi-Fi ẩn đấy chỉ kết nối được bằng file APK trên điện thoại này thôi
+Ví dụ như là điện thoại này mở cái app phan tôm 3 ra
+Thì nó sẽ kết nối với cái Wi-Fi của 2 cái thằng kia
+Hoặc là thằng này phát ra 2 thằng kia vào
+Kết cấu như thế nào thì các em sẽ vẽ lại cho anh cách làm cho nó chuẩn gắt
+Nhưng mà để làm gì, nếu mà tôi copy file vào kết bị thứ hai này
+Thì cái điện thoại của tôi cũng sẽ nhận được file đấy
+Và kết bị 1 cũng nhận được 3 file cho mày đồng bộ vào nhau
+Nhưng về cái công nghệ để sai là phải dùng blockchain
+Tức là blockchain là cái nào, cái này là 1 cái nốt
+Cái này là 1 cái nốt, cái này là 1 cái nốt
+Thì tất tận tận cái nào có cái gì là nó đều đồng bộ vào nhau
+Về giao thức kết nối giống buổi để mua là chỉ cần Wi-Fi 2.4 mà ẩn thôi
+Mà ẩn nhé, ẩn tuổi đói
+Thế thì kết bị 1 thì đập tên ID gì đấy, kết bị ai là tên ID gì đấy
+Thì khi mà cái app Africa này mở lên, mà nó trong phạm vi kết nối là nó phải hiện
+Thứ nhất là hiện là đây đã nhìn thấy 2 kết bị 1, kết bị 2 rồi
+Thì 3 là file đang đồng bộ đây, tốc độ đồng bộ đây
+Sau khi đồng bộ trong thì tôi xem được cái file đấy ở trên
+Cái điện thoại
+Đấy, bước 1 là đến đây đã, bước 2 là còn những cái tác về mạng hoá, về tác thứ, về ghiên
+Vậy nên là về kết bị này là bài đá vừa được, cái câu chuyện từ nhất là phải Wi-Fi được
+Phải ghiên được và phải có pin riêng, pin lưu trữ riêng
+Và kích cướp nhỏ nhất có thể
+Thế thì hiện tại trong đời quanh thì đang có 2 loại kết bị
+Một là có thể là cái mạch ESP32, ngày xưa nó đang bị nhận
+Ở đây ESP32 và cái mạch thứ 2 là con I, I0
+Lại nó bé bằng 2 con tay này
+I0, vật vật là P0W thì nó mới có Wi-Fi
+Phần ESP thì cũng có loại là có sẵn Wi-Fi luôn đúng không
+Phần đánh nghiên cứu nhé, rồi đó đầu ra cho anh là dành xách thiết bị
+Ví dụ đây, ghi âm này dùng micro này nhưng mà thật bé, đắt không vấn đề
+Nhưng mà thật bé, thật gọn, thật xịn
+Thế kế hợp được là trong buổi demo là thậm sĩ không cần phải vỏ
+Nhưng mà demo là cứ để đây, cái cục này ở đây, cục này ở đây
+Và để copy được vào thiết bị này thì nó phải có 1 cái cọc gì đấy
+UFB hay là micro, UFB hay là thái sinh
+2 cái gì đấy, thì xem con ESP32 là nó dùng cái gì
+P0 thì nó dùng micro, UFB, rồi đúng không
+ESP32 cũng dùng micro
+Đấy, thế nhưng mà đấy, bây giờ là cấp nguồn này vào đấy là phải cấp vào cái gì
+Đúng không, cấp mà lại nối cái dây ra thì trong nó hơi đỏng hoàng
+Để cuối cùng, buộc đích là cuối cùng họ ra được thiết bị, nó mẽ bằng bao nhiêu diễn thôi
+Để người ta làm diễn buộc tịch báo
+Nói đấy, người ta đi, người ta giáo cái bà này này
+Thế thì nó cứ ghi âm, nó cứ ghi âm
+Xong là đấy, người ta cầm cái điện thoại, người ta đi bên cạnh ngày
+Là nó lấy được phai ghi âm, nhưng nó không cần phải chạy vào đây, nó tháo cái thiết bị ra nữa
+Hiểu về cái cách dùng nhá
+Đấy, bây giờ phải đưa ra là trong cái phai tải liệu này, nếu mà
+Đang ghi là khoảng cách kiết nối tận 100 mét, chẳng à, nghe nó hơi càng đúng không?
+Chúng ta trong wifi đi đến được đấy, đúng không? 2.4 đi rồi mãi
+2.4 100 mét thì không bật đề
+Đấy, thế nhưng mà ví dụ như là cái tốc độ kiết nối
+Đúng không? 15 mê trên dây hay 12 mê trên dây
+Đúng không?
+Đấy, bây giờ đi tìm những loại mảnh xị nhất không giới hạn đến thân sách
+Để chục triệu một mảnh được, nhưng mà nó đáp ứng
+Sau đấy là cái mạch đấy là làm mình phải tìm được cái đơn vị nó ra không
+Nó rập mạch em, nó rập được mạch cho mình
+Không dùng được cái thiết bị bên thứ 3
+Còn cái trường hợp là mẹ thôi, em dùng mẹ luôn quanh pi được
+Nhưng mà bước đầu cũng kiếm phát hiện, thì đang kỳ vọng là sản phẩm nó dễ trâu như này
+Đấy, bên trong là nó có pin rồi, nhưng nó có cầu thái si đây để cắm
+1 là sạc pin
+2 là còn chuyên phi
+Còn cách thứ 3 nữa là nếu mà không chuyên phi qua cắm chứa tiếp
+Thì tôi dùng cái điện thoại luôn
+Đúng không? Tôi dùng điện thoại với chuyên và thiết bị này
+Thì thiết bị này sau nó lại kết nối với cái điện thoại khác, nó lại chuyên với cái điện thoại
+Cách nữa là mẹ cái thẻ nhớ
+Đúng không? Cho phi vào thẻ nhớ, trong thẻ nhớ có cái gì phán hết đây
+Cách để đự dung nó như thế
+Và trong thời gian sớm nhất là phải PLC được loài
+Chiếc mắt là 2 thiết bị đồng bộ phi với nhau và đồng bộ với tài phai
+Còn ghi âm là tính sau, cái đồng bộ mới là cái khổ
+Đồng bộ sử dụng cái này
+Thì ném vào agent, ném vào GPT, tìm mọi thể loại, tìm cho anh ít nhất 3 phương hãi
+Thì phương hãi nên đi có may mà dừng cái này
+Bởi vì nó rất là mạng bệnh
+Khi chuyển dẫn xong rồi thì bắt đầu còn đến những cái bước nữa
+Những cái bước sau thì anh sẽ nói cái sau, bây giờ nói con nó hơi dối
+Nó là mạng hóa
+Ví dụ tôi có 3 cái phai âm thanh đi vào đây
+3 cái phai âm thanh đi vào đây
+Thì tổng cộng là 6 phai
+Thì 6 phai đấy sẽ được cái bụng mạng hóa nó chuyển thành
+5 phai dạng chấm bin
+Về thiện thoại này cũng là 5 phai chấm bin
+Tức là cái thẳng nghiệp bụng mà nó đến nó lấy cái phai này về nó không nghe được
+Nó phải mang về cơ quan mà cấm vào máy chủ
+Nhưng mà dùng sét liệt kỳ thì mới giải má nó được
+Về bản chất là như thế nhé
+Sau này trên này nó sẽ còn thêm cái bộ để mạng hóa nữa
+Bộ này, bộ mạng hóa, bộ mạng hóa
+Ví dụ tôi cứ ghi âm được
+Về 15 phút thì tôi mạng hóa 1 lần mà tôi xóa cái phai ghi âm đi
+Về sau là con tháo cái thiết bị ra nó mở ra, toàn phai bin cháy được cái gì
+Về thiện thoại, nếu thiện thoại, mục đích cuối của thiện thoại là chỉ có 2 cái thiện thứ nhất là
+Nó đáp được như thế này, lại ra là cắn 1 cục ở đây
+Xong cắn 1 cục ở máy kia
+Thì khi mà tôi chỉ cần đến ở cửa, thế giới 27 thì tôi kết nối cái cục máy kia
+Thì tôi vẫn lấy 1 phai mà
+Đấy, thì đấy mới là cái mục đích chính
+Đấy, bây giờ là trong cái tầm wifi này phủ sống, những cái nào mà cùng cài cái wifi nếp đấy
+Là phải size in dự nhiệm của nhau
+Đấy, là cái bài toàn khó nhất
+Đấy, giải quyết cái bài toàn đấy trước
+Giải quyết cái bài toàn đồng bộ truyền dẫn trước
+Sau này bắt đầu này đến ghi dâm, này đến mạo, là đến các kiểu
+Đấy, còn cái bước cuối là cái bước demo, là chúng tôi sẽ demo ở đây này
+Chúng tôi sẽ copy phai vào thẻ nhớ của cái thiết bị 1 này
+Đúng không?
+Chúng tôi đặt thiết bị 1 vào đây
+Là phai đấy được đưa ra thiết bị ai
+Đấy, xong cái điện thoại này của tôi xuất hiện là cái điện thoại này của tôi là
+Nhận được cái phai đấy mà đã được mạo mát
+Xong là tôi lấy cái phai từ cái điện thoại này, tôi đi ra máy tính
+Tôi qua cái phần đêm giải má của tôi
+Là có chuyển cái phần này thì cái phần mạo mát đấy anh sỉ cho
+Thật ra vẫn không khó
+Này dùng luôn cái phần này trên là chú creep
+Nếu cần, nếu thích kìn thì đi ghi nó lặng, nó chú creep 7.2 anh
+Phần mềm này ngày xưa tạo tham gia viết, là ta rất thích dùng
+Đi đây, đi nè
+Này nó có window, nó có macOS, nó có Linux
+Mà nó có lệnh cơn, gọi cơn mà thôi
+Đấy, dùng cái này đến bây giờ, FDI đã mở quá rồi
+Về cơ bản với kết bị thì nó sẽ làm như thế
+Kết bị ngồi với kết bị ai, sai dịch với nhau
+Và cái con phôn này kết nối với kết bị nào với kết nối
+Thì nó vẫn lấy cái phai, cái đồng bộ
+Thì khi mà kết nối con phôn vào thì nó phải hiện chẳng thái 1 là
+Đồng bộng đến cuối là đến ngày nào giờ nào
+Vì dụ lúc kết nối vào là ở 2 ông này đã đồng bộ chưa xong
+Thì cái thằng Diệp Viên là nó phải ngồi thêm 1 lúc nữa
+Thế đợi đồng bộ
+Ví dụ như là nó kết nối với kết bị tỉnh nhất, đang lấy tiếp phai thì tiếp phai thứ 2
+Nhưng là phải chẳng xế tết thế này
+Vậy là vẫn còn phai đang đồng bộ
+Đó phải estimate chẳng là khoảng 10 giây nữa sao
+Thì vào trên app thì có phích đơn giản thôi, nhưng đồng bộ xong thì dung 1 cái
+Thế tức là cắn vào Diệp Viên để lấy phai là nó cứ cầm cái điện thoại cho tui
+Vì nó lợi đấy, dung phát là sao
+Thế còn cái Uncast thứ 2 là 1 thiết bị và 1 điện thoại thôi
+Nhằm cái mục đích truyền tinh mà không tiếp xúc
+Thì mình phải báo với người ta xem cái khoảng cách tuổi đa là khoảng bao xa
+Nói cái tuổi đa là khoảng bao xa
+Ví dụ như là tui cầm cái điện thoại đây, còn anh kia là anh muốn chuyển phai thôi
+Đấy là chúng tôi tiếp xúc với nhau và cũng để lau food, điện thoại tuyên dung mình tới đi về
+Là không có cái chuyện 2 tháng đúng chuyển thoại nhiều nhau
+Câu chuyện đấy thì các em chắc lý cho anh dành sách những cái gì cần vua
+Phần vỏ để tặng cho em bỏ qua
+Nhưng bây giờ là phải có mạnh này, có pin này, có micro này, có thể nhớ này
+Ýn nhất là thế, đúng không?
+Mạnh thì cố gắng tìm cái mạnh mà nó có sẵn cái wifi và tẩm phát wifi của nó xa hết có thể
+Thế thì phít bách cho anh bụng lấy cho anh trong chiều 2 tuần
+Để anh chốt mua luôn là pháp luôn
