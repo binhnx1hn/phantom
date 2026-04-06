@@ -2,9 +2,10 @@
 import os, sys
 
 src = "test.wav"
-dst = "esp32_client/src/test_wav.h"
-
-os.makedirs(os.path.dirname(dst), exist_ok=True)
+dsts = [
+    "esp32_client/src/test_wav.h",
+    "esp32_server/src/test_wav.h",
+]
 
 data = open(src, "rb").read()
 print(f"Read {src}: {len(data)} bytes ({len(data)/1024:.1f} KB)")
@@ -26,7 +27,11 @@ if row:
     lines.append("  " + ", ".join(row))
 lines.append("};")
 
-with open(dst, "w") as f:
-    f.write("\n".join(lines) + "\n")
+content = "\n".join(lines) + "\n"
+for dst in dsts:
+    os.makedirs(os.path.dirname(dst), exist_ok=True)
+    with open(dst, "w") as f:
+        f.write(content)
+    print(f"Written: {dst}  ({os.path.getsize(dst):,} bytes)")
 
 print(f"Written: {dst}  ({os.path.getsize(dst):,} bytes)")
