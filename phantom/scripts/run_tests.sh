@@ -258,7 +258,8 @@ test_task17() {
         --size "$CONTAINER_SIZE" \
         --audio-files "${TEST_OPUS_DIR}/audio_secret.opus" \
         --decoy-dir /tmp/phantom/decoy \
-        --log-dir "${LOGS_DIR}" 2>&1 | tail -8
+        --log-dir "${LOGS_DIR}" \
+        --weak-keys 2>&1 | tail -8
 
     if [[ -f "$TEST_CONTAINER" ]]; then
         TC_SIZE=$(du -sh "$TEST_CONTAINER" | cut -f1)
@@ -401,7 +402,8 @@ test_task19() {
         --size "$CONTAINER_SIZE" \
         --audio-files "${TEST_OPUS_DIR}/audio_task19.opus" \
         --decoy-dir /tmp/phantom/decoy \
-        --log-dir "${LOGS_DIR}" 2>/dev/null
+        --log-dir "${LOGS_DIR}" \
+        --weak-keys 2>/dev/null
     if [[ ! -f "$TASK19_TC" ]]; then
         fail "Không tạo được container cho task 19+20"
         return 1

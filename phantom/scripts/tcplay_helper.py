@@ -380,6 +380,168 @@ def tcplay_create_hidden(
         return False
 
 
+def tcplay_create_with_hidden(
+    device: str,
+    outer_password: str,
+    hidden_password: str,
+    hidden_size_mb: int,
+    cipher: str = DEFAULT_CIPHER,
+    prf: str = DEFAULT_PRF,
+    timeout: int = 120,
+    weak_keys: bool = False,
+) -> bool:
+    """
+    Create outer + hidden volumes in a single tcplay --create -g pass.
+
+    tcplay -g prompt sequence (verified live on tcplay v3.3):
+      1. "Passphrase: "                        → outer_password
+      2. "Repeat passphrase: "                 → outer_password (confirm)
+      3. "Passphrase for hidden volume: "      → hidden_password
+      4. "Repeat passphrase: "                 → hidden_password (confirm)
+      5. "Size of hidden volume (e.g. 127M): " → "<hidden_size_mb>M"
+      6. "Are you sure ...? (y/n) "            → "y"
+      7. EOF + exit 0
+
+    IMPORTANT: "Passphrase:" is a substring of "Passphrase for hidden volume:".
+    To avoid matching the wrong prompt, we match the LONGER string first in
+    every expect() call that could see either prompt.
+
+    Args:
+        device:           Block device path (e.g. /dev/loop3).
+        outer_password:   Passphrase for the outer (decoy) volume.
+        hidden_password:  Passphrase for the hidden (real) volume.
+        hidden_size_mb:   Size of the hidden volume in MB.
+        cipher:           tcplay cipher string (default AES-256-XTS).
+        prf:              PBKDF PRF string (default SHA512).
+        timeout:          Per-prompt timeout in seconds.
+        weak_keys:        If True, add -w flag (urandom entropy, testing only).
+
+    Returns:
+        True on success (exit 0), False on any failure.
+    """
+    args = [
+        "--create", "-g",
+        f"--device={device}",
+        f"--cipher={cipher}",
+        f"--pbkdf-prf={prf}",
+    ]
+    if weak_keys:
+        args.append("-w")
+
+    cmd = [TCPLAY_BIN] + args
+    log.debug("[tcplay_create_with_hidden] Spawning: %s", " ".join(cmd))
+
+    EOF_TIMEOUT = timeout * 10
+
+    try:
+        child = pexpect.spawn(
+            cmd[0], args=cmd[1:],
+            timeout=timeout, encoding="utf-8",
+            echo=False, codec_errors="replace",
+        )
+    except Exception as exc:
+        log.error("[tcplay_create_with_hidden] Spawn failed: %s", exc)
+        return False
+
+    try:
+        # Step 1: outer passphrase — "Passphrase: "
+        # Match "Passphrase for hidden volume:" first to avoid substring clash,
+        # though it should not appear here. Belt-and-suspenders ordering.
+        i = child.expect([_PAT_HIDDEN, _PAT_PASS, _PAT_EOF, _PAT_TIMEOUT], timeout=timeout)
+        if i == 1:
+            child.sendline(outer_password)
+            log.debug("[tcplay_create_with_hidden] Sent outer passphrase.")
+        else:
+            log.error("[tcplay_create_with_hidden] Unexpected at step 1 (i=%d). buffer=%r", i, child.before)
+            child.close(force=True)
+            return False
+
+        # Step 2: repeat outer — "Repeat passphrase: "
+        i = child.expect([_PAT_REPEAT, _PAT_EOF, _PAT_TIMEOUT], timeout=timeout)
+        if i == 0:
+            child.sendline(outer_password)
+            log.debug("[tcplay_create_with_hidden] Sent outer repeat.")
+        else:
+            log.error("[tcplay_create_with_hidden] No Repeat prompt (i=%d). buffer=%r", i, child.before)
+            child.close(force=True)
+            return False
+
+        # Step 3: hidden passphrase — "Passphrase for hidden volume: "
+        i = child.expect([_PAT_HIDDEN, _PAT_EOF, _PAT_TIMEOUT], timeout=timeout)
+        if i == 0:
+            child.sendline(hidden_password)
+            log.debug("[tcplay_create_with_hidden] Sent hidden passphrase.")
+        else:
+            log.error("[tcplay_create_with_hidden] No hidden Passphrase prompt (i=%d). buffer=%r", i, child.before)
+            child.close(force=True)
+            return False
+
+        # Step 4: repeat hidden — "Repeat passphrase: "
+        i = child.expect([_PAT_REPEAT, _PAT_EOF, _PAT_TIMEOUT], timeout=timeout)
+        if i == 0:
+            child.sendline(hidden_password)
+            log.debug("[tcplay_create_with_hidden] Sent hidden repeat.")
+        else:
+            log.error("[tcplay_create_with_hidden] No Repeat for hidden (i=%d). buffer=%r", i, child.before)
+            child.close(force=True)
+            return False
+
+        # Step 5: size prompt — "Size of hidden volume (e.g. 127M): "
+        i = child.expect([r"(?i)size of hidden", _PAT_EOF, _PAT_TIMEOUT], timeout=timeout)
+        if i == 0:
+            child.sendline(f"{hidden_size_mb}M")
+            log.debug("[tcplay_create_with_hidden] Sent hidden size: %dM.", hidden_size_mb)
+        else:
+            log.error("[tcplay_create_with_hidden] No Size prompt (i=%d). buffer=%r", i, child.before)
+            child.close(force=True)
+            return False
+
+        # Step 6: confirmation — "Are you sure? (y/n)"
+        i = child.expect([_PAT_CONFIRM, _PAT_EOF, _PAT_TIMEOUT], timeout=timeout)
+        if i == 0:
+            child.sendline("y")
+            log.debug("[tcplay_create_with_hidden] Sent 'y' confirmation. Waiting for erase+header write…")
+        elif i == 1:
+            log.debug("[tcplay_create_with_hidden] EOF before confirmation (no prompt needed).")
+        else:
+            log.error("[tcplay_create_with_hidden] TIMEOUT at confirmation step.")
+            child.close(force=True)
+            return False
+
+        # Wait for erase + header write to finish (may take minutes without -w)
+        child.expect(_PAT_EOF, timeout=EOF_TIMEOUT)
+        child.close()
+        rc = child.exitstatus if child.exitstatus is not None else (child.signalstatus or 255)
+        if rc == 0:
+            log.info("[tcplay_create_with_hidden] Container created successfully on %s.", device)
+            return True
+        log.error("[tcplay_create_with_hidden] tcplay rc=%s on %s.", rc, device)
+        return False
+
+    except pexpect.EOF:
+        child.close()
+        rc = child.exitstatus if child.exitstatus is not None else (child.signalstatus or 255)
+        if rc == 0:
+            log.info("[tcplay_create_with_hidden] Container created (EOF path) on %s.", device)
+            return True
+        log.error("[tcplay_create_with_hidden] EOF rc=%s on %s.", rc, device)
+        return False
+    except pexpect.TIMEOUT:
+        log.error("[tcplay_create_with_hidden] Timed out on %s.", device)
+        try:
+            child.close(force=True)
+        except Exception:
+            pass
+        return False
+    except Exception as exc:
+        log.error("[tcplay_create_with_hidden] Error: %s", exc)
+        try:
+            child.close(force=True)
+        except Exception:
+            pass
+        return False
+
+
 def tcplay_map(
     device: str,
     mapper_name: str,

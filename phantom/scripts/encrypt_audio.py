@@ -313,9 +313,9 @@ def encrypt_file_to_container(
             time.sleep(0.3)
         log.debug("Device node ready: %s", mapper_dev)
 
-        # Step 5: Format mapped device as FAT32
-        run_cmd_no_tty(["sudo", "mkfs.fat", "-F", "32", str(mapper_dev)])
-        log.info("FAT32 filesystem created on %s.", mapper_dev)
+        # Step 5: Format mapped device as FAT (auto-selects FAT16/FAT32 by size)
+        run_cmd_no_tty(["sudo", "mkfs.fat", str(mapper_dev)])
+        log.info("FAT filesystem created on %s.", mapper_dev)
 
         # Step 6: Mount FAT32 volume
         run_cmd_no_tty(["sudo", "mount", str(mapper_dev), str(mount_point)])

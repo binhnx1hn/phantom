@@ -37,6 +37,13 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import List, Optional
 
+# Import pexpect-based tcplay helper
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+from tcplay_helper import tcplay_create_with_hidden
+
 # ─────────────────────────────────────────────
 # Configuration constants
 # ─────────────────────────────────────────────
@@ -651,13 +658,14 @@ def create_outer_and_hidden_volumes(
             HIDDEN_VOLUME_RATIO * 100,
             size_mb,
         )
-        ok = _tcplay_create_with_hidden_expect(
+        ok = tcplay_create_with_hidden(
             device=loop_dev,
             outer_password=outer_password,
             hidden_password=hidden_password,
             hidden_size_mb=hidden_size_mb,
             cipher=TCPLAY_CIPHER,
             prf=TCPLAY_PRF,
+            timeout=120,
             weak_keys=weak_keys,
         )
         if ok:
@@ -744,8 +752,11 @@ def _mount_volume(
 
     if format_fat32:
         try:
-            run_cmd(["sudo", "mkfs.fat", "-F", "32", str(mapper_dev)])
-            log.info("FAT32 filesystem created on /dev/mapper/%s.", mapper_name)
+            # Let mkfs.fat auto-select FAT type — FAT32 needs ≥65536 clusters,
+            # small volumes (<64 MB) will use FAT16 automatically, which is fine
+            # for TrueCrypt containers and fully readable by TrueCrypt 7.1a.
+            run_cmd(["sudo", "mkfs.fat", str(mapper_dev)])
+            log.info("FAT filesystem created on /dev/mapper/%s.", mapper_name)
         except subprocess.CalledProcessError as exc:
             log.error(
                 "mkfs.fat failed on %s: %s",
