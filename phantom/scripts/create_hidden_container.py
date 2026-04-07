@@ -16,6 +16,10 @@ Requires Python 3.8+ and root/sudo access.
 Environment variables:
   PHANTOM_OUTER_PASSWORD   - outer volume password (fallback to --outer-password)
   PHANTOM_HIDDEN_PASSWORD  - hidden volume password (fallback to --hidden-password)
+
+NOTE: tcplay reads passphrase from /dev/tty (not stdin).
+      This script uses 'expect' + losetup loop device to work around that.
+      Install: sudo apt install expect
 """
 
 from __future__ import annotations
@@ -155,6 +159,290 @@ def run_cmd(
     return result
 
 
+def _setup_loop_device(file_path: Path) -> str:
+    """Attach a file to a loop device and return device path (e.g. '/dev/loop3').
+
+    Required because tcplay v3.x needs a block device, not a plain file.
+    Caller must call _detach_loop_device() when done.
+
+    Raises subprocess.CalledProcessError if losetup fails.
+    """
+    result = subprocess.run(
+        ["sudo", "losetup", "--find", "--show", str(file_path)],
+        capture_output=True,
+        check=True,
+    )
+    loop_dev = result.stdout.decode().strip()
+    log.debug("Loop device attached: %s → %s", file_path, loop_dev)
+    return loop_dev
+
+
+def _detach_loop_device(loop_dev: str) -> None:
+    """Detach a loop device. Best-effort — errors are logged but not raised."""
+    try:
+        subprocess.run(
+            ["sudo", "losetup", "--detach", loop_dev],
+            capture_output=True,
+            check=True,
+        )
+        log.debug("Loop device detached: %s", loop_dev)
+    except Exception as exc:
+        log.warning("Failed to detach loop device %s: %s", loop_dev, exc)
+
+
+def _tcl_str(s: str) -> str:
+    """Escape a string for safe embedding inside a Tcl double-quoted string."""
+    return (
+        s.replace("\\", "\\\\")
+         .replace('"', '\\"')
+         .replace("[", "\\[")
+         .replace("]", "\\]")
+         .replace("$", "\\$")
+    )
+
+
+def _tcplay_create_expect(
+    device: str,
+    password: str,
+    cipher: str,
+    prf: str,
+) -> bool:
+    """Run tcplay --create (standard volume, no hidden) via 'expect'.
+
+    tcplay reads passphrases from /dev/tty (not stdin), so we must use
+    expect to interact with it.
+
+    Prompt sequence for standard volume:
+      1. Passphrase:
+      2. Repeat passphrase:
+      3. Confirmation "y"
+
+    Args:
+        device:   Block device path (e.g. /dev/loop3).
+        password: Passphrase for the volume.
+        cipher:   tcplay cipher string.
+        prf:      PBKDF PRF string.
+
+    Returns:
+        True on success (exit 0), False on failure.
+    """
+    pw_safe = _tcl_str(password)
+    cmd_str = (
+        f"tcplay --create --device={device}"
+        f" --cipher={cipher} --pbkdf-prf={prf}"
+    )
+    expect_script = f"""
+set timeout 120
+spawn {cmd_str}
+expect "Passphrase:"
+send "{pw_safe}\\r"
+expect "Repeat passphrase:"
+send "{pw_safe}\\r"
+expect -re {{Are you sure.*\\?}}
+send "y\\r"
+expect eof
+catch wait result
+exit [lindex $result 3]
+"""
+
+    try:
+        result = subprocess.run(
+            ["sudo", "expect", "-c", expect_script],
+            capture_output=True,
+            check=True,
+        )
+        log.debug(
+            "expect/tcplay --create output: %s",
+            result.stdout.decode(errors="replace").strip(),
+        )
+        return True
+    except subprocess.CalledProcessError as exc:
+        log.error(
+            "expect/tcplay --create failed: stdout=%s stderr=%s",
+            exc.stdout.decode(errors="replace").strip(),
+            exc.stderr.decode(errors="replace").strip(),
+        )
+        return False
+
+
+def _tcplay_create_with_hidden_expect(
+    device: str,
+    outer_password: str,
+    hidden_password: str,
+    hidden_size_mb: int,
+    cipher: str,
+    prf: str,
+    weak_keys: bool = False,
+) -> bool:
+    """Run tcplay --create -g (outer + hidden volume together) via 'expect'.
+
+    With the -g / --hidden flag, tcplay v3.3 creates both outer and hidden headers
+    in a single pass.  The ACTUAL prompt sequence (verified on tcplay v3.3 live):
+      1. "Passphrase:"                       ← outer volume passphrase
+      2. "Repeat passphrase:"                ← outer (confirmation)
+      3. "Passphrase for hidden volume:"     ← hidden volume passphrase
+      4. "Repeat passphrase:"                ← hidden (confirmation)
+      5. "The total volume size of ... is N M (bytes)"
+      6. "Size of hidden volume (e.g. 127M):" ← tcplay asks for hidden size in MB
+      7. "Are you sure ...?"                  ← final y/n confirmation
+
+    Args:
+        device:          Block device path (e.g. /dev/loop3).
+        outer_password:  Passphrase for the outer (decoy) volume.
+        hidden_password: Passphrase for the hidden (real) volume.
+        hidden_size_mb:  Size of the hidden volume in MB (sent to the size prompt).
+        cipher:          tcplay cipher string.
+        prf:             PBKDF PRF string.
+        weak_keys:       If True, pass -w to tcplay (use urandom, testing only).
+
+    Returns:
+        True on success (exit 0), False on failure.
+    """
+    outer_safe = _tcl_str(outer_password)
+    hidden_safe = _tcl_str(hidden_password)
+    # Add -w (--weak-keys) flag when requested — speeds up test by using urandom
+    # instead of a strong entropy source.  Never use in production.
+    weak_flag = " -w" if weak_keys else ""
+    cmd_str = (
+        f"tcplay --create -g --device={device}"
+        f" --cipher={cipher} --pbkdf-prf={prf}{weak_flag}"
+    )
+    # tcplay v3.3 -g FULL prompt sequence (verified by live strace + expect capture):
+    #   1. "Passphrase:"                       → outer password
+    #   2. "Repeat passphrase:"   (1st time)   → outer password (confirm)
+    #   3. "Passphrase for hidden volume:"     → hidden password
+    #   4. "Repeat passphrase:"   (2nd time)   → hidden password (confirm)
+    #   5. "Size of hidden volume (e.g. 127M):" → hidden size in MB
+    #   6. "Are you sure ...?"                 → "y"
+    #
+    # IMPORTANT: "Passphrase:" is a substring of "Passphrase for hidden volume:".
+    # Using sequential expect/send would match the shorter string first.
+    # Fix: state-machine with a counter so "Repeat passphrase:" sends the right password,
+    # and an explicit pattern for "Size of hidden volume".
+    expect_script = f"""
+set timeout 300
+set passphrase_count 0
+spawn {cmd_str}
+expect {{
+    "Passphrase for hidden volume:" {{
+        send "{hidden_safe}\\r"
+        exp_continue
+    }}
+    "Repeat passphrase:" {{
+        # 1st occurrence → outer confirmation; 2nd → hidden confirmation
+        incr passphrase_count
+        if {{$passphrase_count == 1}} {{
+            send "{outer_safe}\\r"
+        }} else {{
+            send "{hidden_safe}\\r"
+        }}
+        exp_continue
+    }}
+    "Passphrase:" {{
+        send "{outer_safe}\\r"
+        exp_continue
+    }}
+    "Size of hidden volume" {{
+        # tcplay asks how large the hidden volume should be inside the container
+        send "{hidden_size_mb}M\\r"
+        exp_continue
+    }}
+    -re {{Are you sure.*\\?}} {{
+        send "y\\r"
+        exp_continue
+    }}
+    eof {{
+        catch wait result
+        exit [lindex $result 3]
+    }}
+    timeout {{
+        puts "\\nERROR: tcplay timed out waiting for prompt."
+        exit 1
+    }}
+}}
+"""
+
+    try:
+        result = subprocess.run(
+            ["sudo", "expect", "-c", expect_script],
+            capture_output=True,
+            check=True,
+        )
+        log.debug(
+            "expect/tcplay --create -g output: %s",
+            result.stdout.decode(errors="replace").strip(),
+        )
+        return True
+    except subprocess.CalledProcessError as exc:
+        log.error(
+            "expect/tcplay --create -g failed: stdout=%s stderr=%s",
+            exc.stdout.decode(errors="replace").strip(),
+            exc.stderr.decode(errors="replace").strip(),
+        )
+        return False
+
+
+def _tcplay_map_expect(
+    mapper_name: str,
+    device: str,
+    password: str,
+    use_hidden: bool = False,
+) -> bool:
+    """Run tcplay --map via 'expect' to supply passphrase through a PTY.
+
+    tcplay v3.3 does NOT have a --use-hidden flag for --map.
+    To mount the hidden volume, simply supply the hidden password —
+    tcplay tries both outer and hidden headers and uses whichever
+    password matches.  The use_hidden parameter is kept for callers
+    but has no effect on the tcplay command line.
+
+    Args:
+        mapper_name: Name for /dev/mapper/<name>.
+        device:      Loop device path (e.g. /dev/loop1).
+                     Must be a block device — tcplay cannot map raw files.
+        password:    Volume passphrase (outer or hidden).
+        use_hidden:  Informational only (logged). No tcplay flag is added.
+
+    Returns:
+        True on success (exit 0), False on failure.
+    """
+    pw_safe = _tcl_str(password)
+    # tcplay v3.3: --map does NOT accept --use-hidden.
+    # The correct password automatically selects outer vs hidden volume.
+    cmd_str = f"tcplay --map={mapper_name} --device={device}"
+
+    expect_script = f"""
+set timeout 60
+spawn {cmd_str}
+expect "Passphrase:"
+send "{pw_safe}\\r"
+expect eof
+catch wait result
+exit [lindex $result 3]
+"""
+    try:
+        result = subprocess.run(
+            ["sudo", "expect", "-c", expect_script],
+            capture_output=True,
+            check=True,
+        )
+        log.debug(
+            "expect/tcplay --map output (hidden=%s): %s",
+            use_hidden,
+            result.stdout.decode(errors="replace").strip(),
+        )
+        return True
+    except subprocess.CalledProcessError as exc:
+        log.error(
+            "expect/tcplay --map failed for %s (use_hidden=%s): stdout=%s stderr=%s",
+            mapper_name,
+            use_hidden,
+            exc.stdout.decode(errors="replace").strip(),
+            exc.stderr.decode(errors="replace").strip(),
+        )
+        return False
+
+
 def secure_delete(file_path: Path, dry_run: bool = False) -> bool:
     """Securely overwrite and delete a file using shred (3 passes).
 
@@ -279,30 +567,43 @@ def _allocate_container(container_path: Path, size_mb: int) -> bool:
 
 
 # ─────────────────────────────────────────────
-# Step 2: Create outer TrueCrypt volume header
+# Steps 2+3 combined: Create outer + hidden volumes
 # ─────────────────────────────────────────────
-def create_outer_volume(
+def create_outer_and_hidden_volumes(
     container_path: Path,
     size_mb: int,
     outer_password: str,
+    hidden_password: str,
     dry_run: bool = False,
+    weak_keys: bool = False,
 ) -> bool:
-    """Create a TrueCrypt outer volume on a new container file.
+    """Allocate container and create both outer and hidden TrueCrypt headers.
 
-    This allocates the container on disk and writes the outer volume header
-    using tcplay --create (without --hidden flag).
+    Uses 'tcplay --create -g' which creates outer + hidden volumes in ONE pass.
+    tcplay -g asks for the hidden volume size interactively.
+
+    Prompt sequence (handled via expect):
+      1. "Passphrase:"                        ← outer volume passphrase
+      2. "Repeat passphrase:"                 ← outer (confirmation)
+      3. "Passphrase for hidden volume:"      ← hidden volume passphrase
+      4. "Repeat passphrase:"                 ← hidden (confirmation)
+      5. "Size of hidden volume (e.g. 127M):" ← hidden size in MB (sent as "<N>M")
+      6. "Are you sure ...?" y
 
     Args:
         container_path:  Destination .tc file (will be created/overwritten).
         size_mb:         Total container size in MB.
         outer_password:  Password for the outer (decoy) volume.
+        hidden_password: Password for the hidden (real) volume.
         dry_run:         If True, simulate without making changes.
+        weak_keys:       If True, pass -w to tcplay (urandom instead of /dev/random).
+                         Dramatically speeds up testing — NEVER use in production.
 
     Returns:
         True on success, False on failure.
     """
     log.info(
-        "═══ Creating outer volume: %s (%d MB) ═══",
+        "═══ Creating outer+hidden volumes: %s (%d MB) ═══",
         container_path,
         size_mb,
     )
@@ -315,7 +616,7 @@ def create_outer_volume(
 
     if dry_run:
         log.info(
-            "[DRY-RUN] Would allocate %d MB and create outer TrueCrypt header on %s.",
+            "[DRY-RUN] Would allocate %d MB and create outer+hidden TrueCrypt headers on %s.",
             size_mb,
             container_path,
         )
@@ -324,119 +625,52 @@ def create_outer_volume(
     # Ensure parent directory exists
     container_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Allocate container file
+    # Allocate container file with random bytes (urandom fill for security)
     if not _allocate_container(container_path, size_mb):
         return False
 
-    # Write outer volume TrueCrypt header
-    # tcplay reads password + confirmation from stdin (two identical lines)
-    pw_bytes = (outer_password + "\n").encode() * 2
+    # Attach to loop device (tcplay requires a block device, not a plain file)
     try:
-        run_cmd(
-            [
-                "sudo", "tcplay",
-                "--create",
-                f"--device={container_path}",
-                f"--cipher={TCPLAY_CIPHER}",
-                f"--pbkdf-prf={TCPLAY_PRF}",
-            ],
-            input_data=pw_bytes,
-        )
-        log.info("Outer volume header written to %s.", container_path)
-        return True
+        loop_dev = _setup_loop_device(container_path)
     except subprocess.CalledProcessError as exc:
         log.error(
-            "tcplay --create (outer) failed: %s",
+            "losetup failed for %s: %s",
+            container_path,
             exc.stderr.decode(errors="replace"),
         )
         container_path.unlink(missing_ok=True)
         return False
 
-
-# ─────────────────────────────────────────────
-# Step 3: Create hidden volume header inside outer
-# ─────────────────────────────────────────────
-def create_hidden_volume(
-    container_path: Path,
-    hidden_size_mb: int,
-    outer_password: str,
-    hidden_password: str,
-    dry_run: bool = False,
-) -> bool:
-    """Write a hidden TrueCrypt volume header inside an existing outer volume.
-
-    tcplay --create --hidden requires:
-      - The outer password (to locate the outer header and avoid overwriting it)
-      - The hidden password (new password for the inner volume)
-      - The hidden volume size (to carve space from the container tail)
-
-    The hidden volume lives in the free space of the outer volume.  tcplay
-    places the hidden header at a known offset calculated from the container end
-    and hidden_size_mb.
-
-    Args:
-        container_path:  Existing .tc file that already has an outer volume header.
-        hidden_size_mb:  Size of the hidden volume in MB (≤ 60% of total).
-        outer_password:  Outer volume password (needed to protect outer header).
-        hidden_password: Password for the hidden volume.
-        dry_run:         If True, simulate without making changes.
-
-    Returns:
-        True on success, False on failure.
-    """
-    log.info(
-        "═══ Creating hidden volume inside %s (hidden=%d MB) ═══",
-        container_path,
-        hidden_size_mb,
-    )
-
-    if dry_run:
-        log.info(
-            "[DRY-RUN] Would create hidden volume (%d MB) inside %s.",
-            hidden_size_mb,
-            container_path,
-        )
-        return True
-
-    if not container_path.exists():
-        log.error("Container file not found: %s", container_path)
-        return False
-
-    # tcplay --create --hidden stdin protocol:
-    #   Line 1: outer password   (to authenticate and protect outer header)
-    #   Line 2: hidden password  (new password for the inner volume)
-    #   Line 3: hidden password  (confirmation)
-    stdin_data = (
-        outer_password + "\n"
-        + hidden_password + "\n"
-        + hidden_password + "\n"
-    ).encode()
-
+    # Write both outer and hidden volume headers via expect (-g flag)
     try:
-        run_cmd(
-            [
-                "sudo", "tcplay",
-                "--create",
-                "--hidden",
-                f"--device={container_path}",
-                f"--cipher={TCPLAY_CIPHER}",
-                f"--pbkdf-prf={TCPLAY_PRF}",
-                f"--hidden-size-bytes={hidden_size_mb * 1024 * 1024}",
-            ],
-            input_data=stdin_data,
-        )
+        # Calculate hidden volume size: 60% of total, minimum MIN_HIDDEN_SIZE_MB
+        hidden_size_mb = max(MIN_HIDDEN_SIZE_MB, int(size_mb * HIDDEN_VOLUME_RATIO))
         log.info(
-            "Hidden volume header written inside %s (%d MB).",
-            container_path,
+            "Hidden volume size: %d MB (%.0f%% of %d MB total).",
             hidden_size_mb,
+            HIDDEN_VOLUME_RATIO * 100,
+            size_mb,
         )
-        return True
-    except subprocess.CalledProcessError as exc:
-        log.error(
-            "tcplay --create --hidden failed: %s",
-            exc.stderr.decode(errors="replace"),
+        ok = _tcplay_create_with_hidden_expect(
+            device=loop_dev,
+            outer_password=outer_password,
+            hidden_password=hidden_password,
+            hidden_size_mb=hidden_size_mb,
+            cipher=TCPLAY_CIPHER,
+            prf=TCPLAY_PRF,
+            weak_keys=weak_keys,
         )
-        return False
+        if ok:
+            log.info(
+                "Outer+hidden volume headers written to %s (via %s).",
+                container_path,
+                loop_dev,
+            )
+        else:
+            container_path.unlink(missing_ok=True)
+        return ok
+    finally:
+        _detach_loop_device(loop_dev)
 
 
 # ─────────────────────────────────────────────
@@ -448,7 +682,7 @@ def _mount_volume(
     mapper_tag: str,
     use_hidden: bool = False,
     format_fat32: bool = False,
-) -> tuple[Optional[str], Optional[Path]]:
+) -> tuple[Optional[str], Optional[Path], Optional[str]]:
     """Map a TrueCrypt volume and mount it under a temporary directory.
 
     Args:
@@ -459,42 +693,44 @@ def _mount_volume(
         format_fat32:   Format the mapped device as FAT32 before mounting.
 
     Returns:
-        Tuple (mapper_name, mount_point) on success, (None, None) on failure.
-        Caller is responsible for calling _unmount_volume when done.
+        Tuple (mapper_name, mount_point, loop_dev) on success,
+        (None, None, None) on failure.
+        Caller is responsible for calling _unmount_volume(mapper_name, mount_point, loop_dev).
     """
     mapper_name = _unique_mapper_name(MAPPER_PREFIX, mapper_tag)
     mapper_dev = Path(f"/dev/mapper/{mapper_name}")
     mount_point = Path(tempfile.mkdtemp(prefix="phantom_mnt_"))
 
-    # Build tcplay map command
-    map_cmd = [
-        "sudo", "tcplay",
-        f"--map={mapper_name}",
-        f"--device={container_path}",
-    ]
-    if use_hidden:
-        map_cmd.append("--use-hidden")
-
-    pw_bytes = (password + "\n").encode()
-
+    # Attach container to loop device for tcplay --map
     try:
-        run_cmd(map_cmd, input_data=pw_bytes)
-        log.info(
-            "Volume mapped: /dev/mapper/%s (hidden=%s).",
-            mapper_name,
-            use_hidden,
-        )
+        loop_dev = _setup_loop_device(container_path)
     except subprocess.CalledProcessError as exc:
         log.error(
-            "tcplay --map failed (hidden=%s): %s",
-            use_hidden,
+            "losetup failed for %s: %s",
+            container_path,
             exc.stderr.decode(errors="replace"),
         )
         try:
             mount_point.rmdir()
         except OSError:
             pass
-        return None, None
+        return None, None, None
+
+    # Map volume via expect (tcplay reads passphrase from /dev/tty)
+    ok = _tcplay_map_expect(mapper_name, loop_dev, password, use_hidden=use_hidden)
+    if not ok:
+        _detach_loop_device(loop_dev)
+        try:
+            mount_point.rmdir()
+        except OSError:
+            pass
+        return None, None, None
+
+    log.info(
+        "Volume mapped: /dev/mapper/%s (hidden=%s).",
+        mapper_name,
+        use_hidden,
+    )
 
     # Wait for udev to create the /dev/mapper/<name> device node before use.
     # Without this, mkfs.fat or mount may race against udev and see ENOENT.
@@ -502,6 +738,9 @@ def _mount_volume(
         subprocess.run(["sudo", "udevadm", "settle"], capture_output=True, check=False)
     except FileNotFoundError:
         pass  # udevadm not available on all systems; best-effort
+
+    # Extra wait to ensure dm-crypt device node appears in /dev/mapper/
+    time.sleep(0.5)
 
     if format_fat32:
         try:
@@ -514,16 +753,17 @@ def _mount_volume(
                 exc.stderr.decode(errors="replace"),
             )
             _cleanup_mount(mapper_name, mount_point)
+            _detach_loop_device(loop_dev)
             try:
                 mount_point.rmdir()
             except OSError:
                 pass
-            return None, None
+            return None, None, None
 
     try:
         run_cmd(["sudo", "mount", str(mapper_dev), str(mount_point)])
         log.info("Mounted /dev/mapper/%s → %s.", mapper_name, mount_point)
-        return mapper_name, mount_point
+        return mapper_name, mount_point, loop_dev
     except subprocess.CalledProcessError as exc:
         log.error(
             "mount failed for /dev/mapper/%s → %s: %s",
@@ -532,21 +772,33 @@ def _mount_volume(
             exc.stderr.decode(errors="replace"),
         )
         _cleanup_mount(mapper_name, mount_point)
+        _detach_loop_device(loop_dev)
         try:
             mount_point.rmdir()
         except OSError:
             pass
-        return None, None
+        return None, None, None
 
 
-def _unmount_volume(mapper_name: str, mount_point: Path) -> bool:
-    """Unmount a mounted volume and remove the temporary mount directory.
+def _unmount_volume(
+    mapper_name: str,
+    mount_point: Path,
+    loop_dev: Optional[str] = None,
+) -> bool:
+    """Unmount a mounted volume, unmap dm-crypt device, and detach loop device.
+
+    Args:
+        mapper_name: /dev/mapper/<name> to unmap.
+        mount_point: Temporary directory to unmount and remove.
+        loop_dev:    Loop device to detach (e.g. '/dev/loop3').
+                     If None, no loop device is detached.
 
     Returns:
-        True if unmount and unmap succeeded; False otherwise.
+        True if all operations succeeded; False otherwise.
     """
     success = True
 
+    # Step 1: sync + unmount filesystem
     try:
         run_cmd(["sync"])
         run_cmd(["sudo", "umount", str(mount_point)])
@@ -559,6 +811,7 @@ def _unmount_volume(mapper_name: str, mount_point: Path) -> bool:
         )
         success = False
 
+    # Step 2: unmap dm-crypt device
     try:
         run_cmd(["sudo", "tcplay", "--unmap", mapper_name])
         log.info("Unmapped /dev/mapper/%s.", mapper_name)
@@ -570,6 +823,11 @@ def _unmount_volume(mapper_name: str, mount_point: Path) -> bool:
         )
         success = False
 
+    # Step 3: detach the specific loop device that was created for this mount
+    if loop_dev:
+        _detach_loop_device(loop_dev)
+
+    # Step 4: clean up temporary mount directory
     try:
         mount_point.rmdir()
     except OSError:
@@ -626,7 +884,7 @@ def populate_outer_volume(
         log.warning("Decoy files directory not found: %s — outer volume will be empty.", decoy_files_dir)
 
     # Mount outer volume (format FAT32 on first mount)
-    mapper_name, mount_point = _mount_volume(
+    mapper_name, mount_point, loop_dev = _mount_volume(
         container_path,
         outer_password,
         mapper_tag="outer",
@@ -653,7 +911,7 @@ def populate_outer_volume(
         )
         copy_ok = False
     finally:
-        unmount_ok = _unmount_volume(mapper_name, mount_point)
+        unmount_ok = _unmount_volume(mapper_name, mount_point, loop_dev)
         if not unmount_ok:
             copy_ok = False
 
@@ -703,7 +961,7 @@ def populate_hidden_volume(
         log.warning("No audio files provided — hidden volume will be empty.")
 
     # Mount hidden volume (format FAT32 on first write)
-    mapper_name, mount_point = _mount_volume(
+    mapper_name, mount_point, loop_dev = _mount_volume(
         container_path,
         hidden_password,
         mapper_tag="hidden",
@@ -729,7 +987,7 @@ def populate_hidden_volume(
         )
         copy_ok = False
     finally:
-        unmount_ok = _unmount_volume(mapper_name, mount_point)
+        unmount_ok = _unmount_volume(mapper_name, mount_point, loop_dev)
         if not unmount_ok:
             copy_ok = False
 
@@ -778,7 +1036,7 @@ def verify_container(
         ("hidden", hidden_password, True),
     ]:
         log.info("Verifying %s volume …", label)
-        mapper_name, mount_point = _mount_volume(
+        mapper_name, mount_point, loop_dev = _mount_volume(
             container_path,
             password,
             mapper_tag=f"verify_{label}",
@@ -804,7 +1062,7 @@ def verify_container(
             log.warning("Could not list files in %s volume: %s", label, exc)
             results[label] = True  # Mount succeeded; listing is non-critical
 
-        _unmount_volume(mapper_name, mount_point)
+        _unmount_volume(mapper_name, mount_point, loop_dev)
         log.info("%s volume: OK ✓", label.capitalize())
 
     all_ok = all(results.values())
@@ -827,20 +1085,18 @@ def create_full_hidden_container(
     opus_files: List[Path],
     decoy_dir: Path,
     dry_run: bool = False,
+    weak_keys: bool = False,
 ) -> bool:
     """Orchestrate the full hidden volume container creation pipeline.
 
-    Pipeline:
-      1. create_outer_volume       — allocate file + write outer TrueCrypt header
-      2. create_hidden_volume      — write hidden header inside outer free space
-      3. populate_outer_volume     — mount outer, copy decoy files, unmount
-      4. populate_hidden_volume    — mount hidden, copy .opus files, unmount
-      5. verify_container          — test-mount both volumes and confirm access
+    Pipeline (4 steps):
+      1. create_outer_and_hidden_volumes  — allocate file + write outer+hidden headers
+                                            via 'tcplay --create -g' in one pass
+      2. populate_outer_volume            — mount outer, copy decoy files, unmount
+      3. populate_hidden_volume           — mount hidden, copy .opus files, unmount
+      4. verify_container                 — test-mount both volumes and confirm access
 
-    Size allocation:
-      - Total  = total_size_mb
-      - Hidden = floor(total * HIDDEN_VOLUME_RATIO)  [60% default]
-      - Outer  = remainder                            [40% default]
+    Note: tcplay -g manages size allocation internally — no explicit hidden size needed.
 
     Args:
         container_path:  Destination .tc file path.
@@ -866,12 +1122,8 @@ def create_full_hidden_container(
     log.info("Container:  %s", container_path)
     log.info("Total size: %d MB", total_size_mb)
 
-    hidden_size_mb = _calculate_hidden_size_mb(total_size_mb)
-    log.info(
-        "Size split: outer=%d MB (+headers), hidden=%d MB",
-        total_size_mb - hidden_size_mb,
-        hidden_size_mb,
-    )
+    # tcplay -g manages size allocation internally — no explicit split needed
+    log.info("Size:       %d MB total (tcplay -g manages outer/hidden split)", total_size_mb)
     log.info("Opus files: %d", len(opus_files))
     log.info("Decoy dir:  %s", decoy_dir)
 
@@ -883,42 +1135,35 @@ def create_full_hidden_container(
         )
         return False
 
-    # ── Step 1: Create outer volume ────────────────────────────────────────
-    log.info("── Step 1/5: Create outer volume ──────────────────────")
-    if not create_outer_volume(container_path, total_size_mb, outer_password, dry_run):
-        log.error("Pipeline aborted at step 1 (create outer volume).")
-        return False
-
-    # ── Step 2: Create hidden volume inside outer ───────────────────────
-    log.info("── Step 2/5: Create hidden volume ─────────────────────")
-    if not create_hidden_volume(
-        container_path, hidden_size_mb, outer_password, hidden_password, dry_run
+    # ── Step 1: Create outer + hidden volumes in one tcplay -g call ────────
+    log.info("── Step 1/4: Create outer+hidden volumes ───────────────")
+    if not create_outer_and_hidden_volumes(
+        container_path, total_size_mb, outer_password, hidden_password,
+        dry_run=dry_run, weak_keys=weak_keys,
     ):
-        log.error("Pipeline aborted at step 2 (create hidden volume).")
-        if not dry_run:
-            container_path.unlink(missing_ok=True)
+        log.error("Pipeline aborted at step 1 (create outer+hidden volumes).")
         return False
 
-    # ── Step 3: Populate outer volume with decoy files ──────────────────
-    # MUST happen before step 4 (writing to outer after hidden data is present
+    # ── Step 2: Populate outer volume with decoy files ──────────────────
+    # MUST happen before step 3 (writing to outer after hidden data is present
     # would corrupt the hidden volume).
-    log.info("── Step 3/5: Populate outer volume (decoy) ─────────────")
+    log.info("── Step 2/4: Populate outer volume (decoy) ─────────────")
     if not populate_outer_volume(container_path, outer_password, decoy_dir, dry_run):
-        log.error("Pipeline aborted at step 3 (populate outer volume).")
+        log.error("Pipeline aborted at step 2 (populate outer volume).")
         if not dry_run:
             container_path.unlink(missing_ok=True)
         return False
 
-    # ── Step 4: Populate hidden volume with real audio ──────────────────
-    log.info("── Step 4/5: Populate hidden volume (audio) ─────────────")
+    # ── Step 3: Populate hidden volume with real audio ──────────────────
+    log.info("── Step 3/4: Populate hidden volume (audio) ─────────────")
     if not populate_hidden_volume(container_path, hidden_password, opus_files, dry_run):
-        log.error("Pipeline aborted at step 4 (populate hidden volume).")
+        log.error("Pipeline aborted at step 3 (populate hidden volume).")
         if not dry_run:
             container_path.unlink(missing_ok=True)
         return False
 
-    # ── Step 5: Verify both volumes ─────────────────────────────────────
-    log.info("── Step 5/5: Verify container ──────────────────────────")
+    # ── Step 4: Verify both volumes ─────────────────────────────────────
+    log.info("── Step 4/4: Verify container ──────────────────────────")
     if not verify_container(container_path, outer_password, hidden_password, dry_run):
         log.error("Verification failed — container may be corrupt.")
         return False
@@ -1028,6 +1273,16 @@ Examples:
         action="store_true",
         help="Simulate all operations without making actual disk changes.",
     )
+    parser.add_argument(
+        "--weak-keys",
+        action="store_true",
+        dest="weak_keys",
+        help=(
+            "Pass -w (--weak-keys) to tcplay: use urandom instead of /dev/random for "
+            "key material.  Dramatically speeds up testing on Raspberry Pi. "
+            "NEVER use in production — reduces entropy quality."
+        ),
+    )
     return parser.parse_args()
 
 
@@ -1101,6 +1356,7 @@ def main() -> int:
         opus_files=opus_files,
         decoy_dir=args.decoy_dir,
         dry_run=args.dry_run,
+        weak_keys=args.weak_keys,
     )
 
     run_end = datetime.now(tz=timezone.utc)

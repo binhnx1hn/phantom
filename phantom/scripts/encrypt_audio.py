@@ -6,7 +6,9 @@ using tcplay with AES-256-XTS + SHA-512 PBKDF.
 
 Compatible with TrueCrypt 7.1a on PC for decryption.
 
-Requires Python 3.8+ (compatible with Raspberry Pi OS Bullseye/Bookworm).
+Requires Python 3.9+ and pexpect (pip3 install pexpect).
+tcplay v3.x reads passphrase via /dev/tty (PTY) — this script uses pexpect
+and losetup loop devices to work around that requirement.
 """
 
 from __future__ import annotations
@@ -23,6 +25,13 @@ import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
+
+# Import tcplay PTY helper (must be in same directory or sys.path)
+_SCRIPT_DIR = Path(__file__).resolve().parent
+if str(_SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(_SCRIPT_DIR))
+
+from tcplay_helper import run_tcplay, run_cmd_no_tty, setup_loop, teardown_loop
 
 
 # ─────────────────────────────────────────────
@@ -112,7 +121,7 @@ def load_password() -> str:
 
 
 # ─────────────────────────────────────────────
-# Helper: run subprocess
+# Helper: sanitise mapper name
 # ─────────────────────────────────────────────
 def _sanitize_mapper_name(stem: str) -> str:
     """
@@ -125,26 +134,6 @@ def _sanitize_mapper_name(stem: str) -> str:
     if safe and safe[0].isdigit():
         safe = "_" + safe
     return safe[:63]
-
-
-def run_cmd(
-    cmd: list[str],
-    input_data: Optional[bytes] = None,
-    check: bool = True,
-    capture: bool = True,
-) -> subprocess.CompletedProcess:
-    """
-    Execute a shell command and return its CompletedProcess.
-    Raises subprocess.CalledProcessError on non-zero exit when check=True.
-    """
-    log.debug("Running: %s", " ".join(cmd))
-    result = subprocess.run(
-        cmd,
-        input=input_data,
-        capture_output=capture,
-        check=check,
-    )
-    return result
 
 
 # ─────────────────────────────────────────────
@@ -170,11 +159,13 @@ def create_truecrypt_container(
     dry_run: bool = False,
 ) -> bool:
     """
-    Create a TrueCrypt-compatible container file using tcplay.
+    Create a TrueCrypt-compatible container file using tcplay + losetup.
 
     Steps:
-      1. Allocate container file with dd (sparse pre-allocation)
-      2. Call tcplay --create to initialise TrueCrypt headers
+      1. Allocate container file with dd (random fill)
+      2. Attach to loop device (losetup)
+      3. Call tcplay --create via pexpect PTY
+      4. Detach loop device
 
     Returns True on success, False on failure.
     """
@@ -184,47 +175,49 @@ def create_truecrypt_container(
         log.info("[DRY-RUN] Would create container %s (%d MB).", output_path, size_mb)
         return True
 
-    # Step 1: Allocate container file
+    # Step 1: Allocate container file with random data
     try:
-        run_cmd([
+        run_cmd_no_tty([
             "dd",
             "if=/dev/urandom",
             f"of={output_path}",
             "bs=1M",
             f"count={size_mb}",
         ])
-        log.info("Container file allocated: %s", output_path)
+        log.info("Container file allocated: %s (%d MB)", output_path, size_mb)
     except subprocess.CalledProcessError as exc:
-        log.error("Failed to allocate container file: %s", exc.stderr.decode(errors="replace"))
+        log.error("dd failed: %s", exc.stderr.decode(errors="replace"))
         return False
 
-    # Step 2: Initialise TrueCrypt headers via tcplay
-    # tcplay prompts for password TWICE (password + confirmation).
-    # Both are fed through stdin to avoid leaking them in the process list.
-    pw_line = (password + "\n").encode()
-    pw_bytes = pw_line + pw_line  # password\npassword\n  (enter + confirm)
+    # Step 2: Attach to loop device (tcplay v3.x needs block device)
+    loop_dev = setup_loop(output_path)
+    if not loop_dev:
+        log.error("losetup failed for %s — cannot create container.", output_path)
+        output_path.unlink(missing_ok=True)
+        return False
+
     try:
-        run_cmd(
+        # Step 3: Initialise TrueCrypt headers via tcplay + pexpect
+        # Passwords: [password, password] → Passphrase: + Repeat passphrase:
+        rc, out = run_tcplay(
             [
-                "sudo", "tcplay",
                 "--create",
-                f"--device={output_path}",
+                f"--device={loop_dev}",
                 f"--cipher={TCPLAY_CIPHER}",
                 f"--pbkdf-prf={TCPLAY_PRF}",
             ],
-            input_data=pw_bytes,
+            passwords=[password, password],
         )
-        log.info("TrueCrypt headers written to %s.", output_path)
+        if rc != 0:
+            log.error("tcplay --create failed (rc=%d): %s", rc, out[:300])
+            return False
+
+        log.info("TrueCrypt headers written to %s (via %s).", output_path, loop_dev)
         return True
-    except subprocess.CalledProcessError as exc:
-        log.error(
-            "tcplay --create failed for %s: %s",
-            output_path,
-            exc.stderr.decode(errors="replace"),
-        )
-        # Remove partially-created container
-        output_path.unlink(missing_ok=True)
-        return False
+
+    finally:
+        # Step 4: Always detach loop device
+        teardown_loop(loop_dev)
 
 
 # ─────────────────────────────────────────────
@@ -241,14 +234,16 @@ def encrypt_file_to_container(
 
     Workflow:
       1. Calculate container size
-      2. Create TrueCrypt container
-      3. Map (mount) container via tcplay
-      4. Format mapped device as FAT32
-      5. Mount FAT32 volume
-      6. Copy .opus file into volume
-      7. Unmount FAT32 volume
-      8. Unmap TrueCrypt container
-      9. Verify container file exists and is non-empty
+      2. Create TrueCrypt container (dd + losetup + tcplay --create)
+      3. Attach container to loop device
+      4. Map (open) container via tcplay --map
+      5. Format mapped device as FAT32
+      6. Mount FAT32 volume
+      7. Copy .opus file into volume
+      8. Sync and unmount FAT32 volume
+      9. Unmap TrueCrypt container
+      10. Detach loop device
+      11. Verify container file exists and is non-empty
 
     Returns True on success, False on any failure.
     """
@@ -275,57 +270,72 @@ def encrypt_file_to_container(
         mount_point.rmdir()
         return True
 
-    # Step 1-2: Create container
-    if not create_truecrypt_container(tc_output, size_mb, password, dry_run=dry_run):
+    # Steps 1-2: Create container file with TrueCrypt headers
+    if not create_truecrypt_container(tc_output, size_mb, password, dry_run=False):
         mount_point.rmdir()
         return False
 
-    pw_bytes = (password + "\n").encode()
+    # Step 3: Attach container to loop device for --map operation
+    loop_dev = setup_loop(tc_output)
+    if not loop_dev:
+        log.error("losetup failed for %s — cannot map container.", tc_output)
+        mount_point.rmdir()
+        tc_output.unlink(missing_ok=True)
+        return False
 
     try:
-        # Step 3: Map (open) the container
-        run_cmd(
+        # Step 4: Map (open) the container via tcplay + pexpect
+        rc, out = run_tcplay(
             [
-                "sudo", "tcplay",
                 f"--map={mapper_name}",
-                f"--device={tc_output}",
+                f"--device={loop_dev}",
             ],
-            input_data=pw_bytes,
+            passwords=[password],
         )
-        log.info("Container mapped to /dev/mapper/%s", mapper_name)
+        if rc != 0:
+            log.error("tcplay --map failed (rc=%d): %s", rc, out[:300])
+            return False
+        log.info("Container mapped: /dev/mapper/%s", mapper_name)
 
-        # Step 4: Format mapped device as FAT32
-        run_cmd([
-            "sudo", "mkfs.fat", "-F", "32", str(mapper_dev),
-        ])
+        # Wait for udev to create the device node — retry up to 10s
+        try:
+            run_cmd_no_tty(["sudo", "udevadm", "settle"], check=False)
+        except Exception:
+            pass
+
+        # Poll for /dev/mapper/<name> to appear (udevadm settle is not always enough)
+        _deadline = time.time() + 10
+        while not mapper_dev.exists():
+            if time.time() > _deadline:
+                raise RuntimeError(
+                    f"Timeout waiting for device node {mapper_dev} after tcplay --map"
+                )
+            time.sleep(0.3)
+        log.debug("Device node ready: %s", mapper_dev)
+
+        # Step 5: Format mapped device as FAT32
+        run_cmd_no_tty(["sudo", "mkfs.fat", "-F", "32", str(mapper_dev)])
         log.info("FAT32 filesystem created on %s.", mapper_dev)
 
-        # Step 5: Mount FAT32 volume
-        run_cmd([
-            "sudo", "mount", str(mapper_dev), str(mount_point),
-        ])
+        # Step 6: Mount FAT32 volume
+        run_cmd_no_tty(["sudo", "mount", str(mapper_dev), str(mount_point)])
         log.info("Volume mounted at %s.", mount_point)
 
-        # Step 6: Copy .opus file into volume
+        # Step 7: Copy .opus file into volume
         dest_file = mount_point / opus_file.name
-        run_cmd([
-            "sudo", "cp", str(opus_file), str(dest_file),
-        ])
+        run_cmd_no_tty(["sudo", "cp", str(opus_file), str(dest_file)])
         log.info("File copied to container: %s", dest_file)
 
-        # Step 7: Sync and unmount FAT32 volume
-        run_cmd(["sync"])
-        run_cmd(["sudo", "umount", str(mount_point)])
+        # Step 8: Sync and unmount FAT32 volume
+        run_cmd_no_tty(["sync"])
+        run_cmd_no_tty(["sudo", "umount", str(mount_point)])
         log.info("Volume unmounted from %s.", mount_point)
 
-        # Step 8: Unmap (close) TrueCrypt container
-        run_cmd([
-            "sudo", "tcplay",
-            "--unmap", mapper_name,
-        ])
+        # Step 9: Unmap (close) TrueCrypt container
+        run_cmd_no_tty(["sudo", "tcplay", "--unmap", mapper_name])
         log.info("Container unmapped: %s", mapper_name)
 
-        # Step 9: Verify container
+        # Step 11: Verify container
         if not tc_output.exists() or tc_output.stat().st_size == 0:
             log.error("Container file missing or empty after encryption: %s", tc_output)
             return False
@@ -339,11 +349,12 @@ def encrypt_file_to_container(
             opus_file.name,
             exc.stderr.decode(errors="replace") if exc.stderr else str(exc),
         )
-        # Attempt cleanup — best-effort, ignore errors
         _cleanup_after_failure(mapper_name, mount_point, tc_output)
         return False
 
     finally:
+        # Step 10: Always detach loop device
+        teardown_loop(loop_dev)
         # Always remove temp mount point directory
         try:
             mount_point.rmdir()
@@ -389,7 +400,7 @@ def secure_delete(file_path: Path, dry_run: bool = False) -> bool:
         return True
 
     try:
-        run_cmd(["shred", "-n", "3", "-z", "-u", str(file_path)])
+        run_cmd_no_tty(["shred", "-n", "3", "-z", "-u", str(file_path)])
         log.info("Securely deleted: %s", file_path)
         return True
     except FileNotFoundError:
@@ -406,7 +417,7 @@ def secure_delete(file_path: Path, dry_run: bool = False) -> bool:
         log.error(
             "shred failed for %s: %s",
             file_path,
-            exc.stderr.decode(errors="replace"),
+            exc.stderr.decode(errors="replace") if exc.stderr else str(exc),
         )
         return False
 
