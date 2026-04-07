@@ -44,10 +44,10 @@ CFG = {
     # Ten SSID ESP32 (dung de detect bang netsh)
     "node_a_ssid"    : "ESP32-Node-1",
     "node_b_ssid"    : "ESP32-Node-2",
-    "probe_timeout"  : 2,              # timeout kiem tra node (giay)
-    "dl_timeout"     : 30,             # timeout download file (giay)
-    "check_interval" : 3,              # giay giua cac lan kiem tra WiFi
-    "cooldown"       : 5,              # giay doi sau khi sync xong
+    "probe_timeout"  : 1,              # timeout kiem tra node (giay) — giam xuong 1s
+    "dl_timeout"     : 20,             # timeout download file (giay)
+    "check_interval" : 1,              # giay giua cac lan kiem tra WiFi — giam xuong 1s
+    "cooldown"       : 2,              # giay doi sau khi sync xong — giam xuong 2s
 }
 
 SYNC_DIR = Path(__file__).parent.resolve()

@@ -246,21 +246,42 @@ String wavInfoJson(const uint8_t* buf, size_t size) {
   return j;
 }
 
-// ── Helper: HTTP GET text từ Node-1 ──────────────────────────
-String httpGetFromNode1(const char* path, int timeoutMs = 5000) {
+// ── Helper: HTTP GET text từ Node-1 (đọc theo Content-Length) ─
+String httpGetFromNode1(const char* path, int timeoutMs = 6000) {
   WiFiClient c;
   if (!c.connect(NODE1_IP, NODE1_HTTP_PORT)) return "";
   c.printf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n", path, NODE1_IP);
-  String body = "";
-  bool inBody = false;
+  // Đọc headers → lấy Content-Length
+  int contentLength = -1;
   unsigned long t = millis();
   while (c.connected() && (millis()-t) < (unsigned long)timeoutMs) {
-    if (c.available()) {
-      String line = c.readStringUntil('\n'); line.trim();
-      if (inBody) { body += line; }
-      else if (line.length() == 0) { inBody = true; }
-      t = millis();
-    } else delay(1);
+    if (!c.available()) { delay(1); continue; }
+    String line = c.readStringUntil('\n'); line.trim();
+    if (line.length() == 0) break;  // kết thúc headers
+    String lo = line; lo.toLowerCase();
+    if (lo.startsWith("content-length:")) {
+      String val = line.substring(line.indexOf(':')+1);
+      val.trim();
+      contentLength = val.toInt();
+    }
+    t = millis();
+  }
+  // Đọc body theo Content-Length (hoặc đọc cho đến khi disconnect)
+  String body = "";
+  if (contentLength > 0) {
+    body.reserve(contentLength + 4);
+    t = millis();
+    while ((int)body.length() < contentLength && c.connected() && (millis()-t) < (unsigned long)timeoutMs) {
+      if (c.available()) { body += (char)c.read(); t = millis(); }
+      else delay(1);
+    }
+  } else {
+    // Không có Content-Length → đọc cho đến khi disconnect
+    t = millis();
+    while (c.connected() && (millis()-t) < (unsigned long)timeoutMs) {
+      if (c.available()) { body += (char)c.read(); t = millis(); }
+      else delay(1);
+    }
   }
   c.stop();
   return body;
@@ -339,13 +360,21 @@ bool syncFromNode1() {
   }
   Serial.printf("\n[Sync] Connected to Node-1. STA IP: %s\n",
                 WiFi.localIP().toString().c_str());
-  delay(500);
+  delay(300);
 
-  // Lấy danh sách file từ Node-1
-  String listJson = httpGetFromNode1("/file/list", 6000);
+  // Lấy danh sách file từ Node-1 — retry tối đa 3 lần nếu rỗng (tránh race condition)
+  String listJson = "";
+  for (int attempt = 0; attempt < 3; attempt++) {
+    listJson = httpGetFromNode1("/file/list", 4000);
+    if (listJson.length() > 10 && listJson.indexOf("\"name\"") >= 0) break;
+    Serial.printf("[Sync] /file/list empty (attempt %d/3) — retry...\n", attempt+1);
+    // Serve AP clients trong lúc chờ
+    unsigned long tw = millis();
+    while (millis() - tw < 400) { server.handleClient(); delay(5); }
+  }
   Serial.printf("[Sync] /file/list: %s\n", listJson.substring(0,200).c_str());
 
-  // Nếu Node-1 chưa có file → skip
+  // Nếu Node-1 chưa có file → skip (không dùng TCP fallback nữa)
   if (listJson.indexOf("\"count\":0") >= 0 || listJson.indexOf("\"files\":[]") >= 0) {
     Serial.println("[Sync] Node-1 has no files — skip");
     WiFi.disconnect(false); delay(300);
@@ -369,37 +398,11 @@ bool syncFromNode1() {
   Serial.printf("[Sync] Node-1 has %d file(s)\n", remoteFiles.size());
 
   if (remoteFiles.empty()) {
-    // Fallback: nếu /file/list rỗng → thử lấy audio.wav qua TCP (backward compat)
-    WiFiClient tcp;
-    if (tcp.connect(NODE1_IP, NODE1_TCP_PORT)) {
-      tcp.printf("GET /audio.wav HTTP/1.1\r\nHost: %s:%d\r\nConnection: close\r\n\r\n",
-                 NODE1_IP, NODE1_TCP_PORT);
-      int clen = 0; unsigned long t = millis();
-      while (tcp.connected() && (millis()-t) < 5000) {
-        String line = tcp.readStringUntil('\n'); line.trim();
-        if (line.length()==0) break;
-        String lo=line; lo.toLowerCase();
-        if (lo.startsWith("content-length:")) clen=line.substring(line.indexOf(':')+1).toInt();
-        t=millis();
-      }
-      if (clen > 0 && clen <= (int)MAX_FILE_SIZE) {
-        if (ramBuf){free(ramBuf);ramBuf=nullptr;ramSize=0;}
-        ramBuf=(uint8_t*)malloc(clen);
-        if (ramBuf) {
-          size_t rx=0; t=millis();
-          while(rx<(size_t)clen&&tcp.connected()&&(millis()-t)<20000){
-            size_t av=tcp.available();
-            if(av>0){size_t ch=min(av,(size_t)(clen-rx));tcp.readBytes(ramBuf+rx,ch);rx+=ch;t=millis();}else delay(1);
-          }
-          ramSize=rx; ramReady=(rx>=44);
-          if (ramReady) spiffsSave(ramBuf, ramSize);
-        }
-      }
-      tcp.stop();
-    }
-    WiFi.disconnect(false); delay(500);
-    syncMsg = ramReady ? "ok: fallback audio.wav" : "failed: no files";
-    return ramReady;
+    // /file/list rỗng sau 3 lần retry → Node-1 bận hoặc không có file
+    Serial.println("[Sync] /file/list still empty after retries — abort");
+    WiFi.disconnect(false); delay(300);
+    syncMsg = "failed: node-1 busy";
+    return false;
   }
 
   // Download từng file chưa có trong SPIFFS
@@ -415,33 +418,11 @@ bool syncFromNode1() {
     delay(100);
   }
 
-  // Xóa file local không còn tồn tại ở Node-1
-  int deleted = 0;
-  {
-    std::vector<String> localFiles;
-    File root = SPIFFS.open("/");
-    File fi = root.openNextFile();
-    while (fi) {
-      if (!fi.isDirectory()) localFiles.push_back(String(fi.name()));
-      fi.close();
-      fi = root.openNextFile();
-    }
-    root.close();
-    for (auto& lname : localFiles) {
-      String displayName = lname.startsWith("/") ? lname.substring(1) : lname;
-      bool foundInRemote = false;
-      for (auto& rname : remoteFiles) {
-        if (rname == displayName) { foundInRemote = true; break; }
-      }
-      if (!foundInRemote) {
-        String lpath = lname.startsWith("/") ? lname : ("/" + lname);
-        SPIFFS.remove(lpath);
-        Serial.printf("[Sync] Deleted local '%s' — not in Node-1\n", displayName.c_str());
-        deleted++;
-      }
-    }
-  }
-  Serial.printf("[Sync] +%d downloaded, -%d deleted\n", downloaded, deleted);
+  // KHÔNG xóa file local — chỉ bổ sung file còn thiếu (additive sync)
+  Serial.printf("[Sync] +%d downloaded, -0 deleted\n", downloaded);
+
+  // Nháy LED 5 lần sau mỗi lần sync (bất kể có file mới hay không)
+  blinkLED(5, 100);
 
   WiFi.disconnect(false); delay(300);
   Serial.println("[Sync] STA disconnected. AP still running.");
@@ -640,8 +621,7 @@ void handleSync() {
     "{\"status\":\"ok\",\"message\":\"Sync starting in background\"}");
   syncDone = syncFromNode1();
   syncFailed = !syncDone;
-  if (syncDone) blinkLED(5,80);
-  else blinkLED(2,500);
+  // blinkLED đã được gọi bên trong syncFromNode1()
 }
 
 void handleNotFound() {
@@ -787,7 +767,7 @@ void setup() {
 // ── Loop ──────────────────────────────────────────────────────
 static unsigned long _lastSync1 = 0;
 static bool _syncing = false;
-#define SYNC_INTERVAL_MS 60000UL  // 60 giây (tránh drop AP quá thường xuyên)
+#define SYNC_INTERVAL_MS 10000UL  // 10 giây — sync nhanh từ Node-1
 
 void loop() {
   // Luôn kiểm tra nút BOOT để toggle bật/tắt

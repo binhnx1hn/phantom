@@ -8,6 +8,7 @@ import customtkinter as ctk
 from tkinter import filedialog
 import tkinter as tk
 import tkinter.ttk as ttk
+import sys
 import socket, threading, os, time, subprocess, json
 import urllib.request, urllib.error
 from pathlib import Path
@@ -161,12 +162,16 @@ class App(ctk.CTk):
         self._bg_downloaded = False
         self._spin_angle    = 0
         self._spinning      = False
+        self._sync_proc     = None   # subprocess auto_sync
 
         self._build_ui()
         self.after(600, self._auto_refresh)
         threading.Thread(target=self._poll_detect, daemon=True).start()
         # Refresh tab dongbo khi focus vào
         self.bind("<FocusIn>", lambda e: None)
+        # Khởi động auto_sync và bắt sự kiện đóng cửa sổ
+        self._start_auto_sync()
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
 
     # ─────────────────────────────────────────────────────────────────────────
     # BUILD UI
@@ -1255,6 +1260,47 @@ class App(ctk.CTk):
                     self._log(f"Lỗi xóa {name}: {ex}", "err")
         threading.Thread(target=self._refresh_local_tab, daemon=True).start()
         self._show_toast(f"✓  Đã xóa {len(names)} file")
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # AUTO-SYNC LIFECYCLE
+    # ─────────────────────────────────────────────────────────────────────────
+    def _start_auto_sync(self):
+        """Khởi động dongbo/auto_sync.py như subprocess nền."""
+        try:
+            script = Path(__file__).parent / "dongbo" / "auto_sync.py"
+            if not script.exists():
+                return
+            # CREATE_NO_WINDOW trên Windows để không hiện console
+            kwargs = {}
+            if sys.platform == "win32":
+                kwargs["creationflags"] = 0x08000000  # CREATE_NO_WINDOW
+            self._sync_proc = subprocess.Popen(
+                [sys.executable, str(script)],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                **kwargs
+            )
+        except Exception as ex:
+            print(f"[auto_sync] Không khởi động được: {ex}")
+
+    def _stop_auto_sync(self):
+        """Dừng subprocess auto_sync nếu đang chạy."""
+        proc = self._sync_proc
+        if proc and proc.poll() is None:
+            try:
+                proc.terminate()
+                try:
+                    proc.wait(timeout=3)
+                except subprocess.TimeoutExpired:
+                    proc.kill()
+            except Exception:
+                pass
+        self._sync_proc = None
+
+    def _on_close(self):
+        """Xử lý đóng cửa sổ: dừng auto_sync rồi destroy."""
+        self._stop_auto_sync()
+        self.destroy()
 
 
 if __name__ == "__main__":
