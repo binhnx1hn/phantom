@@ -133,8 +133,8 @@ def download_file(ip: str, remote_name: str, local_path: Path) -> bool:
         with urllib.request.urlopen(req, timeout=CFG["dl_timeout"]) as resp:
             data = resp.read()
         elapsed = time.time() - t0
-        if len(data) < 44:
-            log_err(f"  '{remote_name}' qua nho ({len(data)}B) -- bo qua")
+        if len(data) == 0:
+            log_err(f"  '{remote_name}' rong (0B) -- bo qua")
             return False
         local_path.write_bytes(data)
         log_ok(f"  {local_path.name:<38} {len(data)//1024:>5}KB ({elapsed:.1f}s)")
@@ -169,7 +169,7 @@ def sync_node(ip: str, node_label: str) -> int:
         rname = fi["name"]
         lpath = SYNC_DIR / rname  # Luon dung ten goc, khong them suffix
 
-        if lpath.exists() and lpath.stat().st_size >= 44:
+        if lpath.exists() and lpath.stat().st_size > 0:
             log_info(f"  Bo qua '{rname}' -- da co ({lpath.stat().st_size//1024}KB)")
             continue
 

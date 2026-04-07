@@ -48,35 +48,215 @@ MUTED       = "#64748b"   # secondary text
 SUBTLE      = "#94a3b8"   # labels/captions
 
 # ── Network helpers ────────────────────────────────────────────────────────────
+_MIME_MAP = {
+    ".wav":  "audio/wav",
+    ".mp3":  "audio/mpeg",
+    ".ogg":  "audio/ogg",
+    ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".xlsx": "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    ".pdf":  "application/pdf",
+    ".jpg":  "image/jpeg",
+    ".jpeg": "image/jpeg",
+    ".png":  "image/png",
+    ".gif":  "image/gif",
+    ".bmp":  "image/bmp",
+    ".txt":  "text/plain",
+}
+
+def _mime_for(filename: str) -> str:
+    ext = os.path.splitext(filename)[1].lower()
+    return _MIME_MAP.get(ext, "application/octet-stream")
+
 def tcp_upload(host, port, path, data: bytes, timeout=20, filename=""):
+    """Upload qua HTTP (port 80) hoặc TCP raw (port 8080).
+    Luôn gửi Content-Length để ESP32 đọc đúng binary body."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
         s.connect((host, port))
+        mime = _mime_for(filename) if filename else "application/octet-stream"
         req = (f"POST {path} HTTP/1.1\r\nHost: {host}:{port}\r\n"
-               f"Content-Type: audio/wav\r\nContent-Length: {len(data)}\r\n"
+               f"Content-Type: {mime}\r\nContent-Length: {len(data)}\r\n"
                + (f"X-Filename: {filename}\r\n" if filename else "")
                + "Connection: close\r\n\r\n").encode()
         s.sendall(req)
         sent = 0
+        chunk = 4096
         while sent < len(data):
-            s.sendall(data[sent:sent+4096]); sent += 4096
+            end = min(sent + chunk, len(data))
+            s.sendall(data[sent:end])
+            sent = end
         resp = b""
-        s.settimeout(8)
+        s.settimeout(12)
         try:
             while True:
                 c = s.recv(4096)
                 if not c: break
                 resp += c
         except: pass
-        return resp.decode(errors="replace"), min(sent, len(data))
+        return resp.decode(errors="replace"), sent
     except Exception as e:
         return f"ERROR: {e}", 0
     finally:
         try: s.close()
         except: pass
 
+def http_upload(host, port, filename: str, data: bytes, timeout=30):
+    """Upload file lên /file/upload qua HTTP port 80.
+    Giữ nguyên tên file gốc qua header X-Filename.
+    Trả về (response_str, bytes_sent)."""
+    return tcp_upload(host, port, "/file/upload", data,
+                      timeout=timeout, filename=filename)
+
+def http_download_file(host, port, filename: str, timeout=45) -> bytes:
+    """Download file từ /file/download?name=<filename> qua HTTP port 80.
+    Trả về raw bytes của file (không có HTTP headers).
+    Hỗ trợ cả Content-Length và chunked Transfer-Encoding."""
+    import urllib.parse
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(timeout)
+    try:
+        s.connect((host, port))
+        encoded_name = urllib.parse.quote(filename, safe=".-_")
+        path = f"/file/download?name={encoded_name}"
+        s.sendall((f"GET {path} HTTP/1.1\r\nHost: {host}\r\n"
+                   "Connection: close\r\n\r\n").encode())
+
+        # ── Đọc headers — đọc theo chunk lớn, tìm \r\n\r\n ───────
+        header_buf = b""
+        deadline = time.time() + timeout
+        while b"\r\n\r\n" not in header_buf and time.time() < deadline:
+            try:
+                chunk = s.recv(512)
+            except socket.timeout:
+                break
+            if not chunk:
+                break
+            header_buf += chunk
+            if len(header_buf) > 8192:   # guard: headers quá lớn
+                break
+
+        sep = header_buf.find(b"\r\n\r\n")
+        if sep < 0:
+            return b""
+
+        header_text = header_buf[:sep].decode(errors="replace")
+        body_start  = header_buf[sep + 4:]   # bytes đã đọc sau headers
+
+        # Kiểm tra status 200
+        status_line = header_text.split("\r\n")[0]
+        if " 200 " not in status_line and not status_line.endswith(" 200"):
+            return b""
+
+        # Parse Content-Length và Transfer-Encoding
+        content_length = -1
+        chunked = False
+        for line in header_text.split("\r\n")[1:]:
+            lo = line.lower()
+            if lo.startswith("content-length:"):
+                try:
+                    content_length = int(line.split(":", 1)[1].strip())
+                except ValueError:
+                    pass
+            elif lo.startswith("transfer-encoding:") and "chunked" in lo:
+                chunked = True
+
+        # ── Đọc body ─────────────────────────────────────────────
+        if content_length >= 0:
+            # Có Content-Length → đọc đúng số byte
+            body = bytearray(body_start)
+            s.settimeout(timeout)
+            deadline = time.time() + timeout
+            while len(body) < content_length and time.time() < deadline:
+                want = min(4096, content_length - len(body))
+                try:
+                    chunk = s.recv(want)
+                    if not chunk:
+                        break
+                    body.extend(chunk)
+                except socket.timeout:
+                    break
+            return bytes(body)
+
+        elif chunked:
+            # Transfer-Encoding: chunked → decode từng chunk
+            body = bytearray()
+            buf  = bytearray(body_start)
+            s.settimeout(timeout)
+            deadline = time.time() + timeout
+
+            def _read_until_crlf():
+                """Đọc đến \r\n, trả về line (không gồm \r\n)."""
+                nonlocal buf
+                while True:
+                    idx = buf.find(b"\r\n")
+                    if idx >= 0:
+                        line = buf[:idx]
+                        buf  = buf[idx + 2:]
+                        return line
+                    if time.time() > deadline:
+                        return None
+                    try:
+                        more = s.recv(256)
+                        if not more:
+                            return None
+                        buf.extend(more)
+                    except socket.timeout:
+                        return None
+
+            def _read_exact(n):
+                """Đọc đúng n byte từ buf + socket."""
+                nonlocal buf
+                while len(buf) < n and time.time() < deadline:
+                    try:
+                        more = s.recv(min(4096, n - len(buf)))
+                        if not more:
+                            break
+                        buf.extend(more)
+                    except socket.timeout:
+                        break
+                data = bytes(buf[:n])
+                buf  = buf[n:]
+                return data
+
+            while time.time() < deadline:
+                size_line = _read_until_crlf()
+                if size_line is None:
+                    break
+                try:
+                    chunk_size = int(size_line.split(b";")[0].strip(), 16)
+                except (ValueError, IndexError):
+                    break
+                if chunk_size == 0:
+                    break   # last chunk
+                data = _read_exact(chunk_size)
+                body.extend(data)
+                _read_until_crlf()  # consume trailing \r\n after chunk data
+
+            return bytes(body)
+
+        else:
+            # Không có Content-Length và không chunked → đọc đến khi đóng kết nối
+            body = bytearray(body_start)
+            s.settimeout(timeout)
+            try:
+                while True:
+                    chunk = s.recv(4096)
+                    if not chunk:
+                        break
+                    body.extend(chunk)
+            except socket.timeout:
+                pass
+            return bytes(body)
+
+    except Exception:
+        return b""
+    finally:
+        try: s.close()
+        except: pass
+
 def tcp_download(host, port, path, timeout=20):
+    """Legacy TCP download (port 8080). Dùng cho fallback audio.wav."""
     s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
     s.settimeout(timeout)
     try:
@@ -603,7 +783,9 @@ class App(ctk.CTk):
                                relief="flat", cursor="hand2")
             dl_btn.pack(side="left", padx=2)
             dl_btn.bind("<Button-1>", lambda e, fn=fname_cap: threading.Thread(
-                target=self._download_file, args=(fn,), daemon=True).start())
+                target=self._download_file,
+                args=(fn, "client" if self._detected_node == 2 else "server"),
+                daemon=True).start())
             dl_btn.bind("<Enter>", lambda e, b=dl_btn: b.configure(bg=ACCENT))
             dl_btn.bind("<Leave>", lambda e, b=dl_btn: b.configure(bg=BG_SURFACE))
 
@@ -681,13 +863,28 @@ class App(ctk.CTk):
 
     def _browse(self):
         path = filedialog.askopenfilename(
-            filetypes=[("WAV files", "*.wav"), ("All files", "*.*")])
+            title="Chọn file",
+            filetypes=[
+                ("Tất cả định dạng hỗ trợ",
+                 "*.wav *.mp3 *.ogg *.docx *.xlsx *.pdf *.jpg *.jpeg *.png *.gif *.bmp *.txt"),
+                ("Audio",        "*.wav *.mp3 *.ogg"),
+                ("Tài liệu",     "*.docx *.xlsx *.pdf *.txt"),
+                ("Hình ảnh",     "*.jpg *.jpeg *.png *.gif *.bmp"),
+                ("Tất cả file",  "*.*"),
+            ])
         if path: self.wav_path.set(path)
 
     def _browse_then_upload(self):
         path = filedialog.askopenfilename(
             title="Chọn file để gửi",
-            filetypes=[("WAV files", "*.wav"), ("All files", "*.*")])
+            filetypes=[
+                ("Tất cả định dạng hỗ trợ",
+                 "*.wav *.mp3 *.ogg *.docx *.xlsx *.pdf *.jpg *.jpeg *.png *.gif *.bmp *.txt"),
+                ("Audio",        "*.wav *.mp3 *.ogg"),
+                ("Tài liệu",     "*.docx *.xlsx *.pdf *.txt"),
+                ("Hình ảnh",     "*.jpg *.jpeg *.png *.gif *.bmp"),
+                ("Tất cả file",  "*.*"),
+            ])
         if path:
             self.wav_path.set(path)
             threading.Thread(target=self._upload_to_server_do, daemon=True).start()
@@ -789,15 +986,10 @@ class App(ctk.CTk):
             self._conn_lbl.configure(text="Thiết bị B đã kết nối",
                                       text_color=GREEN)
             self._filelist_title.configure(text="Danh sách file — Thiết bị B")
-            self.after(0, lambda: (
-                self._dl_pb.pack(fill="x", padx=12, pady=(0, 4)),
-                self._dl_pb.start()
-            ))
-            self._dl_status_lbl.configure(text="Đang nhận file…",
-                                           text_color=TEAL)
+            self._dl_status_lbl.configure(text="Đã kết nối",
+                                           text_color=GREEN)
             self._log("Đã kết nối Thiết bị B", "ok")
             self._refresh_filelist()
-            self._start_bg_download()
         else:
             self._detect_lbl.configure(text="Chưa kết nối", text_color=SUBTLE)
             self._status_dot.configure(text_color=WARN)
@@ -820,7 +1012,7 @@ class App(ctk.CTk):
         node = self._detected_node
 
         if node == 2:
-            raw = http_get(CLIENT_IP, CLIENT_HTTP, "/file/list", timeout=4)
+            raw = http_get(CLIENT_IP, CLIENT_HTTP, "/file/list", timeout=30)
             try: data = json.loads(raw) if raw else None
             except: data = None
             if data is None:
@@ -835,7 +1027,7 @@ class App(ctk.CTk):
                     else:
                         data = {"files": [], "count": 0}
         else:
-            raw = http_get(SERVER_IP, SERVER_HTTP, "/file/list", timeout=4)
+            raw = http_get(SERVER_IP, SERVER_HTTP, "/file/list", timeout=30)
             try: data = json.loads(raw) if raw else None
             except: data = None
 
@@ -848,12 +1040,19 @@ class App(ctk.CTk):
     # ACTIONS
     # ─────────────────────────────────────────────────────────────────────────
     def _check_wav(self):
-        wav = self.wav_path.get().strip()
-        if not wav or not os.path.exists(wav):
+        """Đọc file đã chọn (bất kỳ định dạng). Tên giữ nguyên để giữ tương thích."""
+        path = self.wav_path.get().strip()
+        if not path or not os.path.exists(path):
             self._log("Chưa chọn file hoặc file không tồn tại", "warn")
             return None
-        data = open(wav, "rb").read()
-        self._log(f"File: {os.path.basename(wav)}  ({len(data)//1024:.0f} KB)", "data")
+        data = open(path, "rb").read()
+        if len(data) == 0:
+            self._log("File rỗng, không thể gửi", "warn")
+            return None
+        ext  = os.path.splitext(path)[1].upper() or "FILE"
+        size_kb = len(data) / 1024
+        size_str = f"{size_kb:.0f} KB" if size_kb >= 1 else f"{len(data)} B"
+        self._log(f"File: {os.path.basename(path)}  ({size_str})  [{ext}]", "data")
         return data
 
     def _upload_to_server(self):
@@ -864,33 +1063,38 @@ class App(ctk.CTk):
             self._upload_pb.pack(fill="x", padx=12, pady=(0, 2)),
             self._upload_pb.start()
         ))
-        upload_ip   = CLIENT_IP   if self._detected_node == 2 else SERVER_IP
-        upload_port = CLIENT_AUDIO if self._detected_node == 2 else SERVER_AUDIO
+        # Luôn upload qua HTTP port 80 /file/upload để giữ nguyên định dạng binary
+        upload_ip   = CLIENT_IP  if self._detected_node == 2 else SERVER_IP
+        upload_port = CLIENT_HTTP if self._detected_node == 2 else SERVER_HTTP
         node_label  = "Thiết bị B" if self._detected_node == 2 else "Thiết bị A"
         wav  = self.wav_path.get()
         data = self._check_wav()
         if data:
             fname = os.path.basename(wav)
-            self._log(f"Đang gửi {fname} → {node_label}…", "header")
+            self._log(f"Đang gửi {fname} → {node_label} ({len(data)//1024} KB)…", "header")
             t0 = time.time()
-            resp, sent = tcp_upload(upload_ip, upload_port, "/upload", data, filename=fname)
+            resp, sent = http_upload(upload_ip, upload_port, fname, data, timeout=30)
             elapsed = time.time() - t0
 
             spiffs_saved = True
+            saved_name = fname
+            resp_body = resp.split("\r\n\r\n", 1)[-1] if "\r\n\r\n" in resp else resp
+            self._log(f"ESP32 response: {resp_body[:300]}", "data")
             try:
-                rj = json.loads(resp.split("\r\n\r\n", 1)[-1])
+                rj = json.loads(resp_body)
                 spiffs_saved = rj.get("spiffs_saved", True)
+                saved_name   = rj.get("filename", fname)
             except: pass
 
             if ('"ok"' in resp or "200" in resp) and "ERROR" not in resp and spiffs_saved:
-                result = f"✓  {fname}  —  {sent//1024:.0f} KB  ({elapsed:.1f}s)"
+                result = f"✓  {saved_name}  —  {sent//1024:.0f} KB  ({elapsed:.1f}s)"
                 self.after(0, lambda t=result: (
                     self._upload_result_lbl.configure(text=t, text_color=GREEN),
                     self._upload_pb.stop(),
                     self._upload_pb.pack_forget()
                 ))
-                self._log(f"Gửi thành công  {sent//1024:.0f} KB  ({elapsed:.1f}s)", "ok")
-                self._show_toast(f"✓  Gửi thành công — {fname}")
+                self._log(f"Gửi thành công  {saved_name}  {sent//1024:.0f} KB  ({elapsed:.1f}s)", "ok")
+                self._show_toast(f"✓  Gửi thành công — {saved_name}")
                 self.after(1500, self._refresh_filelist)
             elif not spiffs_saved:
                 result = f"⚠  Bộ nhớ đầy ({sent//1024:.0f} KB)"
@@ -903,13 +1107,14 @@ class App(ctk.CTk):
                 self._show_toast("⚠  Bộ nhớ đầy — xóa file cũ trước", error=True)
                 self.after(1500, self._refresh_filelist)
             else:
+                resp_preview = resp[:200].replace("\r\n", " | ") if resp else "(no response)"
                 self.after(0, lambda: (
                     self._upload_result_lbl.configure(
                         text="✗  Gửi thất bại", text_color=RED),
                     self._upload_pb.stop(),
                     self._upload_pb.pack_forget()
                 ))
-                self._log("Gửi thất bại", "err")
+                self._log(f"Gửi thất bại — {resp_preview}", "err")
                 self._show_toast("✗  Gửi file thất bại", error=True)
         else:
             self.after(0, lambda: (
@@ -919,23 +1124,50 @@ class App(ctk.CTk):
 
     def _download(self, source="server"):
         """Download file đang chọn từ filelist (fallback audio.wav)."""
-        self._download_file("/audio.wav", source)
+        self._download_file("audio.wav", source)
 
-    def _download_file(self, fname, source="server"):
+    def _download_file(self, fname: str, source="server"):
+        """Download file từ ESP32 qua HTTP /file/download?name=, giữ nguyên tên và định dạng."""
         host = SERVER_IP if source == "server" else self._get_client_ip()
-        port = SERVER_AUDIO if source == "server" else CLIENT_AUDIO
-        if not fname.startswith("/"): fname = "/" + fname
-        self._log(f"Đang tải: {fname}…", "header")
+        port = SERVER_HTTP if source == "server" else CLIENT_HTTP
+        # Bỏ dấu / đầu nếu có (endpoint nhận tên thuần)
+        clean_name = fname.lstrip("/")
+        self._log(f"Đang tải: {clean_name}…", "header")
         t0 = time.time()
-        data = tcp_download(host, port, fname)
+        data = http_download_file(host, port, clean_name, timeout=45)
         elapsed = time.time() - t0
-        if len(data) < 44:
-            self._log(f"Tải thất bại ({len(data)} bytes)", "err"); return
-        save = os.path.basename(fname) or "downloaded.wav"
-        with open(save, "wb") as fout: fout.write(data)
-        abs_path = os.path.abspath(save)
-        self._log(f"✓  Lưu: {save}  ({len(data)//1024:.0f} KB  {elapsed:.1f}s)", "ok")
-        self._show_toast(f"✓  Đã tải: {save}")
+        if len(data) == 0:
+            # Fallback: thử TCP port 8080 cho audio.wav
+            if clean_name == "audio.wav" or clean_name == "":
+                self._log("HTTP thất bại — thử TCP port 8080…", "warn")
+                data = tcp_download(host, SERVER_AUDIO if source == "server" else CLIENT_AUDIO,
+                                    "/audio.wav", timeout=15)
+                elapsed = time.time() - t0
+            if len(data) == 0:
+                self._log("Tải thất bại — không có dữ liệu", "err"); return
+        # Lưu vào thư mục Downloads với tên file gốc
+        dl_dir = os.path.join(os.path.expanduser("~"), "Downloads")
+        os.makedirs(dl_dir, exist_ok=True)
+        save_name = clean_name or "downloaded.bin"
+        save_path = os.path.join(dl_dir, save_name)
+        try:
+            with open(save_path, "wb") as fout: fout.write(data)
+        except PermissionError:
+            save_path = os.path.join(os.path.expanduser("~"), "Desktop", save_name)
+            with open(save_path, "wb") as fout: fout.write(data)
+        abs_path = os.path.abspath(save_path)
+        # Unblock file khỏi Windows Security Zone để Word/Excel mở không bị chặn
+        try:
+            subprocess.run(
+                ["powershell", "-Command", f"Unblock-File '{abs_path}'"],
+                capture_output=True, timeout=5
+            )
+        except Exception:
+            pass
+        kb = len(data) / 1024
+        size_str = f"{kb:.0f} KB" if kb >= 1 else f"{len(data)} B"
+        self._log(f"✓  Lưu: {save_name}  ({size_str}  {elapsed:.1f}s)", "ok")
+        self._show_toast(f"✓  Đã tải: {save_name}")
         try: subprocess.Popen(f'explorer /select,"{abs_path}"')
         except: pass
 
@@ -955,54 +1187,7 @@ class App(ctk.CTk):
             self._log(f"Xóa thất bại", "err")
 
     # ─────────────────────────────────────────────────────────────────────────
-    # BACKGROUND DOWNLOAD
-    # ─────────────────────────────────────────────────────────────────────────
-    def _start_bg_download(self):
-        if self._bg_downloaded: return
-        threading.Thread(target=self._bg_download_thread, daemon=True).start()
-
-    def _bg_download_thread(self):
-        save_path = os.path.join(os.path.expanduser("~"), "Downloads", "audio_esp32.wav")
-        if os.path.exists(save_path) and os.path.getsize(save_path) > 44:
-            self._bg_downloaded = True
-            kb = os.path.getsize(save_path) // 1024
-            self.after(0, lambda: (
-                self._dl_status_lbl.configure(
-                    text=f"✓  Đã có sẵn  ({kb} KB)", text_color=GREEN),
-                self._dl_pb.stop(), self._dl_pb.pack_forget()
-            ))
-            self._log(f"File sẵn sàng  ({kb} KB)", "ok")
-            return
-
-        retries = 0
-        while retries < 12 and not self._bg_downloaded:
-            data = tcp_download("192.168.5.1", 8080, "/audio.wav", timeout=15)
-            if len(data) > 44:
-                try:
-                    os.makedirs(os.path.dirname(save_path), exist_ok=True)
-                    with open(save_path, "wb") as fout: fout.write(data)
-                    self._bg_downloaded = True
-                    kb = len(data) // 1024
-                    self.after(0, lambda k=kb: (
-                        self._dl_status_lbl.configure(
-                            text=f"✓  Đã nhận  ({k} KB)", text_color=GREEN),
-                        self._dl_pb.stop(), self._dl_pb.pack_forget()
-                    ))
-                    self._show_toast(f"✓  File sẵn sàng trong Downloads  ({kb} KB)")
-                    self._log(f"Nhận thành công  ({kb} KB)", "ok")
-                    return
-                except PermissionError:
-                    save_path = os.path.join(
-                        os.path.expanduser("~"), "Desktop", "audio_esp32.wav")
-            retries += 1
-            time.sleep(5)
-
-        self.after(0, lambda: (
-            self._dl_status_lbl.configure(
-                text="Không nhận được — thử lại sau", text_color=RED),
-            self._dl_pb.stop(), self._dl_pb.pack_forget()
-        ))
-
+    # BACKGROUND DOWNLOAD — tải tất cả file từ Node-2, giữ nguyên tên & định dạng
 
     # ─────────────────────────────────────────────────────────────────────────
     # TAB CALLBACK
@@ -1020,7 +1205,7 @@ class App(ctk.CTk):
         hdr = ctk.CTkFrame(parent, fg_color="transparent")
         hdr.pack(fill="x", pady=(6, 8), padx=4)
 
-        ctk.CTkLabel(hdr, text="File WAV trong  dongbo/",
+        ctk.CTkLabel(hdr, text="File trong  dongbo/",
                      font=ctk.CTkFont("Segoe UI", 13, "bold"),
                      text_color=TEXT, anchor="w"
                      ).pack(side="left")
@@ -1098,7 +1283,7 @@ class App(ctk.CTk):
 
         # Placeholder
         self._local_empty_lbl = tk.Label(
-            self._local_rows, text="Thư mục dongbo/ chưa có file WAV",
+            self._local_rows, text="Thư mục dongbo/ chưa có file",
             bg=BG_SURFACE, fg=MUTED,
             font=("Segoe UI", 10), pady=28)
         self._local_empty_lbl.pack()
@@ -1110,35 +1295,58 @@ class App(ctk.CTk):
 
     # ─────────────────────────────────────────────────────────────────────────
     def _refresh_local_tab(self):
-        """Quét dongbo/ và cập nhật UI."""
+        """Quét dongbo/ và cập nhật UI — hiển thị TẤT CẢ file."""
         DONGBO_DIR.mkdir(parents=True, exist_ok=True)
-        wavs = sorted(DONGBO_DIR.glob("*.wav"),
-                      key=lambda p: p.stat().st_mtime, reverse=True)
-        self.after(0, self._update_local_rows, wavs)
+        # Lấy tất cả file (không phải thư mục), bỏ qua file ẩn
+        all_files = sorted(
+            [p for p in DONGBO_DIR.iterdir()
+             if p.is_file() and not p.name.startswith(".")],
+            key=lambda p: p.stat().st_mtime, reverse=True)
+        self.after(0, self._update_local_rows, all_files)
 
-    def _update_local_rows(self, wavs):
+    @staticmethod
+    def _icon_for(path: Path) -> tuple:
+        """Trả về (icon, color) theo loại file."""
+        ext = path.suffix.lower()
+        if ext in (".wav", ".mp3", ".ogg", ".flac", ".aac"):
+            return "♪", "#3b82f6"   # xanh dương — âm thanh
+        if ext in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp"):
+            return "🖼", "#a855f7"   # tím — ảnh
+        if ext in (".docx", ".doc", ".odt"):
+            return "📄", "#2563eb"   # xanh — word
+        if ext in (".xlsx", ".xls", ".csv"):
+            return "📊", "#16a34a"   # xanh lá — bảng
+        if ext == ".pdf":
+            return "📕", "#ef4444"   # đỏ — PDF
+        if ext in (".zip", ".rar", ".7z", ".tar", ".gz"):
+            return "🗜", "#f59e0b"   # vàng — nén
+        if ext in (".txt", ".md", ".log"):
+            return "📝", "#94a3b8"   # xám — text
+        return "📦", "#64748b"       # mặc định
+
+    def _update_local_rows(self, all_files):
         for w in self._local_rows.winfo_children():
             w.destroy()
         self._local_selected.clear()
 
-        if not wavs:
+        if not all_files:
             tk.Label(self._local_rows,
-                     text="Thư mục dongbo/ chưa có file WAV",
+                     text="Thư mục dongbo/ chưa có file",
                      bg=BG_SURFACE, fg=MUTED,
                      font=("Segoe UI", 10), pady=28).pack()
             self._local_stat_lbl.configure(text="Không có file")
             return
 
-        total_kb = sum(p.stat().st_size for p in wavs) // 1024
+        total_kb = sum(p.stat().st_size for p in all_files) // 1024
         self._local_stat_lbl.configure(
-            text=f"{len(wavs)} file  •  {total_kb} KB  •  {DONGBO_DIR}")
+            text=f"{len(all_files)} file  •  {total_kb} KB  •  {DONGBO_DIR}")
 
-        icons = ["♪", "♫", "♩", "♬"]
-        for i, p in enumerate(wavs):
+        for i, p in enumerate(all_files):
             sz    = p.stat().st_size
             mtime = time.strftime("%d/%m  %H:%M", time.localtime(p.stat().st_mtime))
             sz_str = f"{sz/1024:.1f} KB" if sz < 1024*1024 else f"{sz/1024/1024:.2f} MB"
             row_bg = BG_ROW if i % 2 == 0 else BG_ROW_ALT
+            icon, icon_color = self._icon_for(p)
 
             row = tk.Frame(self._local_rows, bg=row_bg, cursor="hand2")
             row.pack(fill="x")
@@ -1148,16 +1356,15 @@ class App(ctk.CTk):
             inner.pack(fill="x", padx=4, pady=2)
 
             # Checkbox (dùng Label làm toggle)
-            chk_var = tk.BooleanVar(value=False)
             chk_lbl = tk.Label(inner, text="☐",
                                 bg=row_bg, fg=MUTED,
                                 font=("Segoe UI", 13),
                                 width=2, cursor="hand2")
             chk_lbl.pack(side="left", padx=(6, 0), pady=4)
 
-            # Icon nhạc
-            tk.Label(inner, text=icons[i % len(icons)],
-                     bg=BG_SURFACE, fg=ACCENT_ICON,
+            # Icon theo loại file
+            tk.Label(inner, text=icon,
+                     bg=BG_SURFACE, fg=icon_color,
                      font=("Segoe UI", 14),
                      width=3, pady=10
                      ).pack(side="left", padx=(4, 8), pady=6)
