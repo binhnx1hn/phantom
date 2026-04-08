@@ -64,7 +64,7 @@
 #define MY_AP_IP_STR       "192.168.4.1"
 
 // ── Sync interval ─────────────────────────────────────────────
-#define SYNC_INTERVAL_MS   10000UL   // đồng bộ mỗi 10 giây
+#define SYNC_INTERVAL_MS   30000UL   // đồng bộ mỗi 30 giây (lệch pha với Node-2=20s)
 
 WebServer  server(HTTP_PORT);
 WiFiServer audioServer(AUDIO_PORT);
@@ -334,7 +334,9 @@ void handleFileList() {
     }
     root.close();
   }
-  String j = "{\"files\":[";
+  String j;
+  j.reserve(2048);   // pre-alloc để tránh heap fragmentation khi concat 6+ file
+  j = "{\"files\":[";
   int count = 0;
   for (auto& fname : names) {
     String path        = fname.startsWith("/") ? fname : ("/" + fname);
@@ -972,6 +974,8 @@ bool httpDownloadFileFromNode2(const String& filename) {
   }
   c.printf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
            path.c_str(), NODE2_IP);
+
+  // ── Đọc HTTP headers ──────────────────────────────────────
   int contentLength = 0;
   unsigned long t = millis();
   while (c.connected() && (millis()-t) < 8000) {
@@ -991,28 +995,54 @@ bool httpDownloadFileFromNode2(const String& filename) {
     Serial.printf("[Sync2] Bad CL=%d for '%s'\n", contentLength, filename.c_str());
     return false;
   }
-  uint8_t* buf = (uint8_t*)malloc(contentLength);
-  if (!buf) { c.stop(); Serial.println("[Sync2] OOM"); return false; }
-  size_t rx = 0; t = millis();
+
+  // ── Kiểm tra SPIFFS trước ────────────────────────────────
+  size_t freeBytes = SPIFFS.totalBytes() - SPIFFS.usedBytes();
+  if ((size_t)contentLength > freeBytes) {
+    c.stop();
+    Serial.printf("[Sync2] SPIFFS not enough: need %d, free %d\n", contentLength, freeBytes);
+    return false;
+  }
+
+  // ── Stream chunk 512B thẳng vào SPIFFS (không malloc lớn) ─
+  String spiffsPath = "/" + filename;
+  File outFile = SPIFFS.open(spiffsPath, "w");
+  if (!outFile) {
+    c.stop();
+    Serial.printf("[Sync2] SPIFFS open '%s' FAILED\n", spiffsPath.c_str());
+    return false;
+  }
+  uint8_t chunk[512];
+  size_t rx = 0;
+  t = millis();
   while (rx < (size_t)contentLength && c.connected() && (millis()-t) < 30000) {
     size_t av = c.available();
     if (av > 0) {
-      size_t want = min(min(av, (size_t)(contentLength-rx)), (size_t)4096);
-      size_t rd = c.readBytes(buf+rx, want);
-      rx += rd; t = millis();
+      size_t want = min(min(av, (size_t)(contentLength-rx)), sizeof(chunk));
+      size_t rd = c.readBytes(chunk, want);
+      if (rd > 0) { outFile.write(chunk, rd); rx += rd; t = millis(); }
     } else { delay(1); }
   }
+  outFile.close();
   c.stop();
-  Serial.printf("[Sync2] '%s' rx=%d/%d bytes\n", filename.c_str(), rx, contentLength);
-  if (rx == 0) { free(buf); return false; }
-  bool saved = spiffsSaveAs(buf, rx, "/" + filename);
-  if (saved && filename == "audio.wav") {
+
+  bool saved = (rx == (size_t)contentLength);
+  Serial.printf("[Sync2] '%s' rx=%d/%d → %s\n",
+                filename.c_str(), rx, contentLength, saved?"OK":"FAIL");
+
+  if (!saved) { SPIFFS.remove(spiffsPath); return false; }
+
+  // ── Nếu là audio.wav → load vào RAM buffer ────────────────
+  if (filename == "audio.wav") {
     if (ramBuf) { free(ramBuf); ramBuf=nullptr; ramSize=0; ramReady=false; }
-    ramBuf = buf; ramSize = rx; ramReady = true;
-  } else {
-    free(buf);
+    ramBuf = (uint8_t*)malloc(rx);
+    if (ramBuf) {
+      File rf = SPIFFS.open(spiffsPath, "r");
+      if (rf) { rf.read(ramBuf, rx); rf.close(); ramSize=rx; ramReady=(rx>=44); }
+      else { free(ramBuf); ramBuf=nullptr; }
+    }
   }
-  return saved;
+  return true;
 }
 
 // ── Lấy size file từ JSON list ────────────────────────────────
@@ -1163,24 +1193,10 @@ void loop() {
     _lastSync2 = millis();  // hoãn sync sau upload
   }
 
-  // Periodic sync từ Node-2 mỗi SYNC_INTERVAL_MS:
-  // - Không sync nếu đang có AP station kết nối (laptop đang dùng)
-  // - Reset timer sau mỗi sync để tránh loop
-  if (!_syncing2 && (millis() - _lastSync2 >= SYNC_INTERVAL_MS)) {
-    // Kiểm tra có AP client không — nếu có, hoãn sync
-    uint8_t apClients = WiFi.softAPgetStationNum();
-    if (apClients > 0) {
-      Serial.printf("[Sync2] Hoãn sync — có %d client đang kết nối AP\n", apClients);
-      _lastSync2 = millis();  // đặt lại timer, thử sau SYNC_INTERVAL_MS
-    } else {
-      _syncing2  = true;
-      _lastSync2 = millis();
-      int before = countSpiffsFiles();
-      Serial.printf("\n[Sync2] ── Bắt đầu đồng bộ (Thiết bị A có %d file) ──\n", before);
-      syncFromNode2();
-      int after  = countSpiffsFiles();
-      Serial.printf("[Sync2] Danh sách: %d file (Thiết bị A)\n", after);
-      _syncing2  = false;
-    }
-  }
+  // Node-1 KHÔNG chủ động sync từ Node-2 nữa
+  // → Tránh deadlock: khi Node-1 đang STA thì AP pause → Node-2 gọi /file/list trống
+  // → Node-2 là bên chủ động kéo file từ Node-1 (1 chiều)
+  // → Node-1 chỉ serve API: /file/list, /file/download, /file/upload
+  (void)_lastSync2;   // tắt cảnh báo unused variable
+  (void)_syncing2;
 }
