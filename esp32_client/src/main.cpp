@@ -314,7 +314,9 @@ String httpGetFromNode1(const char* path, int timeoutMs = 6000) {
   return body;
 }
 
-// ── Helper: download một file từ Node-1 → lưu SPIFFS ─────────
+// ── Helper: download một file từ Node-1 → stream thẳng vào SPIFFS ────
+// KHÔNG malloc toàn bộ file — đọc TCP 512B/chunk, ghi thẳng SPIFFS
+// Hỗ trợ file lớn không giới hạn bởi free heap
 bool httpDownloadFileFromNode1(const String& filename) {
   String path = "/file/download?name=" + filename;
   WiFiClient c;
@@ -324,18 +326,26 @@ bool httpDownloadFileFromNode1(const String& filename) {
   }
   c.printf("GET %s HTTP/1.1\r\nHost: %s\r\nConnection: close\r\n\r\n",
            path.c_str(), NODE1_IP);
+
+  // Đọc HTTP headers
   int contentLength = 0;
+  bool is200 = false;
   unsigned long t = millis();
   while (c.connected() && (millis()-t) < 8000) {
     if (!c.available()) { delay(1); continue; }
     String line = c.readStringUntil('\n'); line.trim();
-    if (line.length() == 0) break;
+    if (line.length() == 0) break;   // blank line = end of headers
     String lo = line; lo.toLowerCase();
+    if (lo.startsWith("http/")) {
+      is200 = (lo.indexOf(" 200") >= 0);
+      if (!is200) {
+        c.stop();
+        Serial.printf("[Sync] Non-200 for '%s': %s\n", filename.c_str(), line.c_str());
+        return false;
+      }
+    }
     if (lo.startsWith("content-length:"))
       contentLength = line.substring(line.indexOf(':')+1).toInt();
-    if (lo.startsWith("http/") && lo.indexOf(" 200 ") < 0 && lo.indexOf(" 200\r") < 0) {
-      c.stop(); Serial.printf("[Sync] Non-200 for '%s'\n", filename.c_str()); return false;
-    }
     t = millis();
   }
   if (contentLength <= 0 || contentLength > (int)MAX_FILE_SIZE) {
@@ -343,29 +353,79 @@ bool httpDownloadFileFromNode1(const String& filename) {
     Serial.printf("[Sync] Bad CL=%d for '%s'\n", contentLength, filename.c_str());
     return false;
   }
-  uint8_t* buf = (uint8_t*)malloc(contentLength);
-  if (!buf) { c.stop(); Serial.println("[Sync] OOM"); return false; }
-  size_t rx = 0; t = millis();
-  while (rx < (size_t)contentLength && c.connected() && (millis()-t) < 30000) {
+
+  // Kiểm tra dung lượng SPIFFS trước
+  size_t freeBytes = SPIFFS.totalBytes() - SPIFFS.usedBytes();
+  if ((size_t)contentLength > freeBytes) {
+    c.stop();
+    Serial.printf("[Sync] SPIFFS không đủ chỗ: cần %d free %d bytes\n",
+                  contentLength, freeBytes);
+    return false;
+  }
+
+  // Mở file SPIFFS để ghi streaming
+  String spiffsPath = "/" + filename;
+  if (SPIFFS.exists(spiffsPath)) SPIFFS.remove(spiffsPath);
+  File f = SPIFFS.open(spiffsPath, "w");
+  if (!f) {
+    c.stop();
+    Serial.printf("[Sync] SPIFFS open FAILED for '%s'\n", filename.c_str());
+    return false;
+  }
+
+  // Stream TCP → SPIFFS chunk 512B, không malloc toàn bộ
+  uint8_t chunk[512];
+  size_t rx = 0;
+  t = millis();
+  while (rx < (size_t)contentLength && c.connected() && (millis()-t) < 45000) {
     size_t av = c.available();
     if (av > 0) {
-      size_t want = min(min(av, (size_t)(contentLength-rx)), (size_t)4096);
-      size_t rd = c.readBytes(buf+rx, want);
-      rx += rd; t = millis();
-    } else { delay(1); }
+      size_t want = min(av, min((size_t)512, (size_t)(contentLength - rx)));
+      size_t rd   = c.readBytes(chunk, want);
+      if (rd > 0) {
+        f.write(chunk, rd);
+        rx += rd;
+        t = millis();
+      }
+    } else {
+      delay(1);
+    }
   }
+  f.close();
   c.stop();
+
   Serial.printf("[Sync] '%s' rx=%d/%d bytes\n", filename.c_str(), rx, contentLength);
-  if (rx == 0) { free(buf); return false; }
-  bool saved = spiffsSaveAs(buf, rx, "/" + filename);
-  if (saved && filename == "audio.wav") {
-    if (ramBuf) { free(ramBuf); ramBuf=nullptr; ramSize=0; ramReady=false; }
-    ramBuf = buf; ramSize = rx; ramReady = true;
-  } else {
-    free(buf);
+
+  // Xác minh kích thước
+  bool saved = false;
+  if (rx > 0 && SPIFFS.exists(spiffsPath)) {
+    File chk = SPIFFS.open(spiffsPath, "r");
+    if (chk) { saved = ((size_t)chk.size() == rx); chk.close(); }
   }
-  Serial.printf("[Sync] '%s' %d bytes → %s\n", filename.c_str(), rx, saved?"OK":"FAIL");
-  return saved;
+  if (!saved) {
+    SPIFFS.remove(spiffsPath);
+    Serial.printf("[Sync] '%s' verify FAIL → xóa\n", filename.c_str());
+    return false;
+  }
+
+  // Nếu là audio.wav → load vào RAM (chỉ load nếu đủ heap)
+  if (filename == "audio.wav" && rx <= 1800000) {
+    if (ESP.getFreeHeap() > (int)rx + 32768) {
+      if (ramBuf) { free(ramBuf); ramBuf=nullptr; ramSize=0; ramReady=false; }
+      File fw = SPIFFS.open(spiffsPath, "r");
+      if (fw) {
+        ramBuf = (uint8_t*)malloc(rx);
+        if (ramBuf) {
+          size_t rd = fw.read(ramBuf, rx);
+          fw.close(); ramSize = rd; ramReady = (rd >= 44);
+        } else fw.close();
+      }
+    }
+  }
+
+  Serial.printf("[Sync] '%s' %d bytes → OK  heap=%d\n",
+                filename.c_str(), rx, ESP.getFreeHeap());
+  return true;
 }
 
 // ── Lấy size của 1 file từ JSON list Node-1 ──────────────────
