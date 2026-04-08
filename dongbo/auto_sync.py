@@ -50,7 +50,8 @@ CFG = {
     "cooldown"       : 2,              # giay doi sau khi sync xong — giam xuong 2s
 }
 
-SYNC_DIR = Path(__file__).parent.resolve()
+# Thu muc luu file = folder_test/ (trong goc workspace)
+SYNC_DIR = Path(__file__).parent.parent.resolve() / "folder_test"
 
 # ── Mau ANSI ──────────────────────────────────────────────────────────────────
 GRN = "\033[92m"; YLW = "\033[93m"; RED = "\033[91m"
