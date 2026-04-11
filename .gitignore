@@ -49,6 +49,16 @@ folder_test/output/
 decode/output/
 decode/*.bin
 
+# ── Phantom output folder (auto-save từ encode.py) ───────────
+output/
+
+# ── Phantom demo/test files (không commit dữ liệu thật) ──────
+phantom/
+!phantom/.gitkeep
+
+# ── Runtime data ─────────────────────────────────────────────
+data.json
+
 # ── Credentials / môi trường ─────────────────────────────────
 .env
 *.env

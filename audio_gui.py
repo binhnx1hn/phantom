@@ -83,7 +83,7 @@ def _phtm_unpack(bin_path: str, key_path: str, out_dir: str, log_cb=None):
     return results
 
 # ── Local folder (same level as audio_gui.py) ─────────────────────────────────
-DONGBO_DIR = Path(__file__).parent / "folder_test"
+DONGBO_DIR = Path(__file__).parent / "phantom"
 
 # ── Network config ─────────────────────────────────────────────────────────────
 SERVER_IP     = "192.168.4.1"
@@ -801,6 +801,34 @@ class App(ctk.CTk):
                       command=self._open_downloads
                       ).pack(fill="x", padx=12, pady=(0, 8))
 
+        # Divider
+        ctk.CTkFrame(parent, fg_color=BORDER, height=1, corner_radius=0
+                     ).pack(fill="x", padx=12, pady=(8, 0))
+
+        # ── Section: Encrypt Files ────────────────────────────────────
+        ctk.CTkLabel(parent, text="ENCRYPT",
+                     font=ctk.CTkFont("Segoe UI", 10, "bold"),
+                     text_color=MUTED, anchor="w"
+                     ).pack(fill="x", padx=16, pady=(12, 4))
+
+        self._enc_files_btn = ctk.CTkButton(
+            parent,
+            text="▶  Encrypt Files",
+            font=ctk.CTkFont("Segoe UI", 12, "bold"),
+            fg_color="#1C1C1E",
+            hover_color="#3A3A3C",
+            text_color="white",
+            height=34,
+            corner_radius=20,
+            command=self._open_encrypt_app)
+        self._enc_files_btn.pack(fill="x", padx=12, pady=(0, 4))
+
+        self._enc_files_lbl = ctk.CTkLabel(
+            parent, text="",
+            font=ctk.CTkFont("Segoe UI", 9),
+            text_color=MUTED, anchor="w", wraplength=230)
+        self._enc_files_lbl.pack(fill="x", padx=14, pady=(0, 4))
+
         # Spacer pushes content up
         ctk.CTkFrame(parent, fg_color="transparent").pack(fill="both", expand=True)
         self._upload_section_lbl = ctk.CTkLabel(parent, text="", width=0, height=0)
@@ -1115,6 +1143,28 @@ class App(ctk.CTk):
         dl = os.path.join(os.path.expanduser("~"), "Downloads")
         try: subprocess.Popen(f'explorer "{dl}"')
         except: pass
+
+    def _open_encrypt_app(self):
+        if self._detected_node == 0:
+            self._log("No device connected — cannot open Encrypt (upload will fail)", "warn")
+            self._show_toast("⚠  No device connected — cannot upload", error=True)
+            self.after(0, lambda: self._enc_files_lbl.configure(
+                text="⚠ Connect to Phantom WiFi first", text_color=RED))
+            return
+        # Device connected — open encode.py
+        import subprocess as _sp, sys
+        encode_path = str(Path(__file__).parent / "encode.py")
+        try:
+            kwargs = {}
+            if sys.platform == "win32":
+                kwargs["creationflags"] = _sp.DETACHED_PROCESS
+            _sp.Popen([sys.executable, encode_path], **kwargs)
+            self.after(0, lambda: self._enc_files_lbl.configure(
+                text="✓ Encrypt window opened", text_color=GREEN))
+            self._log("✓  Opened encode.py", "ok")
+        except Exception as e:
+            self._show_toast(f"✗  Cannot open encrypt: {e}", error=True)
+            self._log(f"Cannot open encode.py: {e}", "err")
 
     def _show_toast(self, msg, error=False):
         # White frosted glass toast floating over gradient
@@ -1761,7 +1811,7 @@ class App(ctk.CTk):
             lambda e: self._local_canvas.yview_scroll(-1*(e.delta//120), "units"))
 
         self._local_empty_lbl = tk.Label(
-            self._local_rows, text="No files in folder_test/",
+            self._local_rows, text="No files in phantom/",
             bg=BG_CARD, fg=MUTED,
             font=("Segoe UI", 10), pady=28)
         self._local_empty_lbl.pack()
@@ -1804,7 +1854,7 @@ class App(ctk.CTk):
 
         if not all_files:
             tk.Label(self._local_rows,
-                     text="No files in folder_test/",
+                     text="No files in phantom/",
                      bg=BG_CARD, fg=MUTED,
                      font=("Segoe UI", 10), pady=28).pack()
             self._local_stat_lbl.configure(text="No files")

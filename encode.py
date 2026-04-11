@@ -1,14 +1,12 @@
 """
-chuyen.py — PHANTOM Secure File Encrypt & Transfer
-Style: Cyberpunk City Night — navy depths + electric blue + neon cyan-teal
-Matches gui_phantom.py layout exactly (nav rail | sidebar | content)
-Run:   .venv\Scripts\python chuyen.py
+encode.py — PHANTOM Secure File Encrypt & Transfer
+Style: macOS Finder Light — clean white + blue accent (HIG)
+Run:   .venv\Scripts\python encode.py
 """
 
 import customtkinter as ctk
-import tkinter as tk
-from tkinter import filedialog, messagebox
-import sys, socket, threading, os, time, subprocess, json
+from tkinter import filedialog
+import sys, socket, threading, os, time, json
 import zipfile, hashlib, io, struct, urllib.request, urllib.error
 
 # ── PHANTOM 3-layer crypto ────────────────────────────────────────────────────
@@ -35,14 +33,11 @@ def _phtm_derive(master):
 
 def _phtm_encrypt_3layer(data: bytes, master: bytes) -> bytes:
     k_aes, k_hmac, k_chacha = _phtm_derive(master)
-    # Layer 1: AES-256-GCM
     n_aes = _secrets.token_bytes(12)
     ct1   = AESGCM(k_aes).encrypt(n_aes, data, None)
-    # Layer 2: HMAC-SHA256
     h = _hmac.HMAC(k_hmac, _hashes.SHA256(), backend=_backend())
     h.update(n_aes + ct1)
     hmac_tag = h.finalize()
-    # Layer 3: ChaCha20-Poly1305
     n_cha   = _secrets.token_bytes(12)
     payload = n_aes + ct1 + hmac_tag
     ct3     = ChaCha20Poly1305(k_chacha).encrypt(n_cha, payload, None)
@@ -59,46 +54,13 @@ def generate_key_file(path: str):
     open(path, "wb").write(master)
     return path, pub_fp
 
-# ── Paths & network ───────────────────────────────────────────────────────────
+# ── Network ───────────────────────────────────────────────────────────────────
 _KNOWN_IPS = [
-    ("192.168.4.1", "Phantom-1"),
-    ("192.168.5.1", "Phantom-2"),
-    ("192.168.6.1", "Phantom-3"),
-    ("192.168.7.1", "Phantom-4"),
+    ("192.168.4.1", "Phantom-1"), ("192.168.5.1", "Phantom-2"),
+    ("192.168.6.1", "Phantom-3"), ("192.168.7.1", "Phantom-4"),
 ]
-HTTP_PORT = 80
-TCP_PORT  = 8080
+TCP_PORT = 8080
 
-# ── Theme ─────────────────────────────────────────────────────────────────────
-ctk.set_appearance_mode("dark")
-ctk.set_default_color_theme("dark-blue")
-
-# ── Cyberpunk City Night palette ──────────────────────────────────────────────
-C_BG        = "#010326"
-C_CARD      = "#010440"
-C_SURFACE   = "#020659"
-C_NAV       = "#020550"
-C_ROW       = "#010440"
-C_ROW_ALT   = "#020552"
-C_BORDER    = "#0A1580"
-C_BLUE      = "#030BA6"
-C_BLUE_D    = "#020880"
-C_BLUE_BR   = "#1A2FFF"
-C_PINK      = "#1BF2DD"
-C_PINK_D    = "#13C4B2"
-C_GREEN     = "#00FFB3"
-C_RED       = "#FF0050"
-C_ORANGE    = "#FF6B00"
-C_TEAL      = "#00D4FF"
-C_PURPLE    = "#1BF2DD"
-C_PURPLE_D  = "#13C4B2"
-C_LABEL     = "#F0F4FF"
-C_LABEL2    = "#A0AAEE"
-C_LABEL3    = "#6878CC"
-C_FILL3     = "#020756"
-C_GLOW      = "#1BF2DD40"
-
-# ── Network helpers ───────────────────────────────────────────────────────────
 def tcp_upload(host, port, data: bytes, timeout=30, filename=""):
     s = socket.socket(); s.settimeout(timeout)
     try:
@@ -107,12 +69,10 @@ def tcp_upload(host, port, data: bytes, timeout=30, filename=""):
                f"Content-Type: application/octet-stream\r\nContent-Length: {len(data)}\r\n"
                + (f"X-Filename: {filename}\r\n" if filename else "")
                + "Connection: close\r\n\r\n").encode()
-        s.sendall(req)
-        sent = 0
+        s.sendall(req); sent = 0
         while sent < len(data):
             s.sendall(data[sent:sent+4096]); sent += min(4096, len(data)-sent)
-        resp = b""
-        s.settimeout(12)
+        resp = b""; s.settimeout(12)
         try:
             while True:
                 c = s.recv(4096)
@@ -125,866 +85,737 @@ def tcp_upload(host, port, data: bytes, timeout=30, filename=""):
         try: s.close()
         except: pass
 
-def http_get(host, port, path, timeout=4):
-    try:
-        s = socket.socket(); s.settimeout(timeout)
-        s.connect((host, port))
-        s.sendall(f"GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n".encode())
-        d = b""
-        try:
-            while True:
-                c = s.recv(4096)
-                if not c: break
-                d += c
-        except: pass
-        s.close()
-        idx = d.find(b"\r\n\r\n")
-        return d[idx+4:].decode(errors="replace") if idx >= 0 else ""
-    except: return ""
-
-def http_get_json(url, timeout=4):
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "PhantomGUI/4.0"})
-        with urllib.request.urlopen(req, timeout=timeout) as r:
-            return json.loads(r.read().decode())
-    except: return None
-
-def http_post(host, port, path, timeout=6):
-    try:
-        s = socket.socket(); s.settimeout(timeout)
-        s.connect((host, port))
-        s.sendall(f"POST {path} HTTP/1.1\r\nHost: {host}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".encode())
-        d = b""
-        try:
-            while True:
-                c = s.recv(4096)
-                if not c: break
-                d += c
-        except: pass
-        s.close()
-        idx = d.find(b"\r\n\r\n")
-        return d[idx+4:].decode(errors="replace") if idx >= 0 else ""
-    except: return ""
-
 def scan_phantoms(known=_KNOWN_IPS, timeout=2):
     found = []
     def _check(ip, name):
         try:
             req = urllib.request.Request(f"http://{ip}/status",
-                                         headers={"User-Agent": "PhantomGUI/4.0"})
+                                         headers={"User-Agent": "PhantomGUI/5.0"})
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 d = json.loads(r.read().decode())
-            pk   = d.get("public_key", "")
-            last4 = pk[-4:].upper() if len(pk) >= 4 else "????"
-            found.append((ip, name, last4, d))
+            pk = d.get("public_key", "")
+            found.append((ip, name, pk[-4:].upper() if len(pk) >= 4 else "????", d))
         except: pass
-    threads = [threading.Thread(target=_check, args=(ip, nm), daemon=True)
-               for ip, nm in known]
+    threads = [threading.Thread(target=_check, args=(ip, nm), daemon=True) for ip, nm in known]
     for t in threads: t.start()
     for t in threads: t.join()
     return found
 
-# ═════════════════════════════════════════════════════════════════════════════
-# WIDGETS — same helpers as gui_phantom.py
-# ═════════════════════════════════════════════════════════════════════════════
-def ios_card(parent, **kw):
-    defaults = dict(fg_color=C_CARD, corner_radius=12,
-                    border_color=C_BORDER, border_width=1)
-    defaults.update(kw)
-    return ctk.CTkFrame(parent, **defaults)
+# ── Telegram White Theme ──────────────────────────────────────────────────────
+ctk.set_appearance_mode("light")
+ctk.set_default_color_theme("blue")
 
-def ios_btn(parent, text, command, style="fill", **kw):
-    base = dict(font=ctk.CTkFont("Segoe UI", 16),
-                corner_radius=10, height=44, command=command)
-    if style == "fill":
-        base.update(fg_color=C_PINK, hover_color=C_PINK_D,
-                    text_color="#010326")
-    elif style == "purple":
-        base.update(fg_color=C_PURPLE, hover_color=C_PURPLE_D,
-                    text_color="#010326")
-    elif style == "tinted":
-        base.update(fg_color=C_BLUE, hover_color=C_BLUE_D,
-                    text_color=C_LABEL)
-    elif style == "ghost":
-        base.update(fg_color=C_FILL3, hover_color=C_SURFACE,
-                    border_color=C_BORDER, border_width=1,
-                    text_color=C_LABEL2)
-    elif style == "danger":
-        base.update(fg_color=C_PINK, hover_color=C_PINK_D,
-                    border_color=C_PINK, border_width=1,
-                    text_color="#010326")
+C_BG        = "#FFFFFF"    # main window / content background
+C_PANEL     = "#EEF2F8"    # sidebar background (very light blue-gray, like Telegram)
+C_CARD      = "#FFFFFF"    # card surface
+C_SURFACE   = "#F5F7FA"    # elevated surface / hover state
+C_INPUT     = "#F5F7FA"    # input field background
+C_BORDER    = "#E5E5EA"    # subtle border
+C_BORDER_HI = "#2979FF"    # focus/active border (blue, thin)
+
+# Text hierarchy
+C_TEXT      = "#1C1C1E"    # primary — near black
+C_TEXT2     = "#6E6E73"    # secondary — medium gray
+C_TEXT3     = "#AEAEB2"    # tertiary / placeholder — light gray
+C_WHITE     = "#FFFFFF"
+C_BLACK     = "#1C1C1E"
+
+# Accent colors — status indicators + layer card colors
+C_BLUE      = "#2979FF"    # primary blue (progress bars, links)
+C_GREEN     = "#34C759"    # success status
+C_ORANGE    = "#FF9500"    # warning status / HMAC layer
+C_RED       = "#FF3B30"    # error status
+C_TEAL      = "#5AC8FA"    # info / teal layer accent
+C_VIOLET    = "#AF52DE"    # ChaCha20 / purple layer accent
+
+# Section header
+C_SEC_HDR   = "#8E8E93"
+
+# ── Fonts ─────────────────────────────────────────────────────────────────────
+def _font(size=13, weight="normal"):
+    for f in ["SF Pro Display", "Segoe UI", "Helvetica Neue"]:
+        try: return ctk.CTkFont(f, size, weight)
+        except: pass
+    return ctk.CTkFont(size=size, weight=weight)
+
+def _mono(size=13, weight="normal"):
+    for f in ["JetBrains Mono", "Cascadia Code", "Consolas"]:
+        try: return ctk.CTkFont(f, size, weight)
+        except: pass
+    return ctk.CTkFont("Consolas", size, weight)
+
+# ── Widget factories ──────────────────────────────────────────────────────────
+def tg_card(parent, **kw):
+    d = dict(fg_color=C_CARD, corner_radius=12,
+             border_color=C_BORDER, border_width=1)
+    d.update(kw)
+    return ctk.CTkFrame(parent, **d)
+
+# keep legacy alias so any remaining call sites don't break
+mac_card = tg_card
+
+def tg_btn(parent, text, command, style="primary", **kw):
+    # ALL styles = black pill + white text + subtle border for "bubble" depth
+    _BLACK    = "#1C1C1E"
+    _BLACK_HV = "#3A3A3C"
+    _BLACK_BR = "#4A4A4C"   # slightly lighter border → gives 3-D raised look
+    base = dict(corner_radius=20, height=38, command=command, font=_font(13, "bold"),
+                fg_color=_BLACK, hover_color=_BLACK_HV,
+                text_color="#FFFFFF",
+                border_color=_BLACK_BR, border_width=1)
+    # style kwarg kept for API compatibility — ignored, all black now
     base.update(kw)
     return ctk.CTkButton(parent, text=text, **base)
 
-def ios_entry(parent, **kw):
-    defaults = dict(fg_color=C_FILL3, border_color=C_BORDER,
-                    border_width=1, text_color=C_LABEL,
-                    placeholder_text_color=C_LABEL3,
-                    height=40, corner_radius=8,
-                    font=ctk.CTkFont("Consolas", 14))
-    defaults.update(kw)
-    return ctk.CTkEntry(parent, **defaults)
+def pill(parent, text, color, tint):
+    f = ctk.CTkFrame(parent, fg_color=tint, corner_radius=10, border_width=0)
+    ctk.CTkLabel(f, text=text, font=_mono(9, "bold"),
+                 text_color=color, padx=6, pady=2).pack()
+    return f
 
-# ═════════════════════════════════════════════════════════════════════════════
-# MAIN APP
+# legacy alias
+mac_btn = tg_btn
+
+def tg_entry(parent, **kw):
+    d = dict(fg_color=C_INPUT, border_color=C_BORDER, border_width=1,
+             text_color=C_TEXT, placeholder_text_color=C_TEXT3,
+             height=38, corner_radius=10, font=_font(13))
+    d.update(kw)
+    return ctk.CTkEntry(parent, **d)
+
+# legacy alias
+mac_entry = tg_entry
+
+def tg_sec(parent, text):
+    return ctk.CTkLabel(parent, text=text.upper(),
+                        font=_font(10, "bold"),
+                        text_color=C_SEC_HDR, anchor="w")
+
+# legacy alias
+sec_hdr = tg_sec
+
+def hr(parent, color=None, padx=12, pady=6):
+    ctk.CTkFrame(parent, fg_color=color or C_BORDER, height=1,
+                 corner_radius=0).pack(fill="x", padx=padx, pady=pady)
+
 # ═════════════════════════════════════════════════════════════════════════════
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
-        self.title("Phantom Encrypt")
-        self.geometry("1080x680")
-        self.minsize(860, 540)
+        self.title("PHANTOM — Encrypt")
+        self.geometry("1200x760")
+        self.minsize(960, 620)
         self.configure(fg_color=C_BG)
 
-        # state
-        self._selected_files: list  = []
-        self._bin_bytes             = None
-        self._bundle_name           = ""
-        self._key_path              = ""
-        self._key_bytes             = None
-        self._key_pub_fp            = ""
-        self._spin_angle            = 0
-        self._spinning              = False
-        self._phantoms: list        = []
-        self._active_ip             = ""
-        self._active_name           = ""
-        self._sync_status: dict     = {}
+        self._selected_files: list = []
+        self._bin_bytes  = None
+        self._bundle_name = ""
+        self._key_path   = ""
+        self._key_bytes  = None
+        self._key_pub_fp = ""
+        self._spin_angle = 0
+        self._spinning   = False
+        self._active_ip  = ""
+        self._active_name = ""
 
         self._build_ui()
         self.after(400, self._start_spinner)
         if not _CRYPTO_OK:
-            self.after(800, lambda: self._log(
-                "Missing: pip install cryptography", "err"))
+            self.after(800, lambda: self._log("⚠  pip install cryptography"))
         threading.Thread(target=self._poll_detect, daemon=True).start()
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # ROOT LAYOUT  (3-column: nav │ sidebar │ content)
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── ROOT ──────────────────────────────────────────────────────────────────
     def _build_ui(self):
-        root = ctk.CTkFrame(self, fg_color=C_BG, corner_radius=0)
-        root.pack(fill="both", expand=True)
-        root.grid_rowconfigure(0, weight=1)
-        root.grid_columnconfigure(0, weight=0)  # nav rail
-        root.grid_columnconfigure(1, weight=0)  # sidebar
-        root.grid_columnconfigure(2, weight=1)  # content
+        self._build_titlebar()
+        body = ctk.CTkFrame(self, fg_color=C_BG, corner_radius=0)
+        body.pack(fill="both", expand=True)
+        body.grid_rowconfigure(0, weight=1)
+        body.grid_columnconfigure(0, weight=0)
+        body.grid_columnconfigure(1, weight=1)
 
-        # ── Nav rail ──────────────────────────────────────────────────────────
-        nav = ctk.CTkFrame(root, fg_color=C_NAV, width=64, corner_radius=0)
-        nav.grid(row=0, column=0, sticky="nsew")
-        nav.grid_propagate(False)
-        self._build_nav(nav)
-        tk.Frame(root, bg=C_BORDER, width=1).grid(row=0, column=0,
-            sticky="nse", padx=(63, 0))
+        # Sidebar — 360px, C_PANEL background, 1px right border
+        sb = ctk.CTkFrame(body, fg_color=C_PANEL, width=360, corner_radius=0,
+                          border_color=C_BORDER, border_width=0)
+        sb.grid(row=0, column=0, sticky="nsew")
+        sb.grid_propagate(False)
 
-        # ── Sidebar ───────────────────────────────────────────────────────────
-        self._sidebar = ctk.CTkFrame(root, fg_color=C_CARD, width=264,
-                                     corner_radius=0)
-        self._sidebar.grid(row=0, column=1, sticky="nsew")
-        self._sidebar.grid_propagate(False)
-        tk.Frame(root, bg=C_BORDER, width=1).grid(row=0, column=1,
-            sticky="nse", padx=(263, 0))
+        # 1px right border line on sidebar
+        ctk.CTkFrame(body, fg_color=C_BORDER, width=1,
+                     corner_radius=0).grid(row=0, column=0, sticky="nse")
 
-        # ── Content ───────────────────────────────────────────────────────────
-        self._content = ctk.CTkFrame(root, fg_color=C_BG, corner_radius=0)
-        self._content.grid(row=0, column=2, sticky="nsew", padx=(1, 0))
+        self._cf = ctk.CTkFrame(body, fg_color=C_BG, corner_radius=0)
+        self._cf.grid(row=0, column=1, sticky="nsew")
 
-        self._build_sidebar(self._sidebar)
-        self._build_content(self._content)
+        self._build_sidebar(sb)
+        self._build_content(self._cf)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # NAV RAIL
-    # ─────────────────────────────────────────────────────────────────────────
-    def _build_nav(self, parent):
-        parent.pack_propagate(False)
+    # ── TITLE BAR ─────────────────────────────────────────────────────────────
+    def _build_titlebar(self):
+        bar = ctk.CTkFrame(self, fg_color=C_PANEL, height=46, corner_radius=0)
+        bar.pack(fill="x", side="top")
+        bar.pack_propagate(False)
 
-        badge = ctk.CTkFrame(parent, fg_color=C_PURPLE, width=36, height=36,
-                             corner_radius=9)
-        badge.pack(pady=(20, 14))
-        badge.pack_propagate(False)
-        ctk.CTkLabel(badge, text="🔒", font=ctk.CTkFont("Segoe UI", 16),
-                     text_color="#010326").place(relx=0.5, rely=0.5, anchor="center")
+        # Left — macOS traffic light dots
+        tl = ctk.CTkFrame(bar, fg_color="transparent")
+        tl.pack(side="left", padx=14)
+        for clr, cmd in [("#FF5F56", self.destroy), ("#FFBD2E", self.iconify), ("#27C93F", lambda: None)]:
+            dot = ctk.CTkFrame(tl, fg_color=clr, width=12, height=12, corner_radius=6)
+            dot.pack(side="left", padx=3, pady=17)
+            dot.bind("<Button-1>", lambda e, c=cmd: c())
 
-        tk.Frame(parent, bg=C_BORDER, height=1).pack(fill="x", padx=10, pady=(0, 8))
+        # Center — app title
+        center = ctk.CTkFrame(bar, fg_color="transparent")
+        center.place(relx=0.5, rely=0.5, anchor="center")
+        ctk.CTkLabel(center, text="PHANTOM — Encrypt",
+                     font=_font(14, "bold"), text_color=C_TEXT).pack()
 
-        ctk.CTkFrame(parent, fg_color="transparent").pack(fill="both", expand=True)
-
-        self._status_dot = ctk.CTkLabel(parent, text="●",
-                                        font=ctk.CTkFont("Segoe UI", 11),
-                                        text_color=C_ORANGE)
-        self._status_dot.pack(pady=(0, 4))
-
-        self._conn_spinner = ctk.CTkLabel(parent, text="◌",
-                                          font=ctk.CTkFont("Consolas", 15),
-                                          text_color=C_LABEL3)
-        self._conn_spinner.pack(pady=(0, 14))
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SIDEBAR — form
-    # ─────────────────────────────────────────────────────────────────────────
-    def _build_sidebar(self, parent):
-        dark = ctk.CTkFrame(parent, fg_color=C_CARD, corner_radius=0)
-        dark.pack(fill="both", expand=True)
-
-        # Title
-        title_row = ctk.CTkFrame(dark, fg_color="transparent")
-        title_row.pack(fill="x", padx=16, pady=(18, 0))
-        ctk.CTkLabel(title_row, text="PHANTOM",
-                     font=ctk.CTkFont("Consolas", 18, "bold"),
-                     text_color=C_PURPLE).pack(side="left")
-        ctk.CTkLabel(title_row, text=" ENCRYPT",
-                     font=ctk.CTkFont("Consolas", 18, "bold"),
-                     text_color=C_LABEL).pack(side="left")
-
-        ctk.CTkLabel(dark, text="3-Layer Cryptographic Engine",
-                     font=ctk.CTkFont("Consolas", 13),
-                     text_color=C_LABEL3).pack(anchor="w", padx=16, pady=(2, 12))
-
-        tk.Frame(dark, bg=C_BORDER, height=1).pack(fill="x", padx=16, pady=(0, 12))
-
-        # ── Connection ────────────────────────────────────────────────────────
-        ctk.CTkLabel(dark, text="◈  CONNECTION",
-                     font=ctk.CTkFont("Consolas", 13),
-                     text_color=C_LABEL2, anchor="w"
-                     ).pack(fill="x", padx=16, pady=(0, 4))
-
-        conn_card = ios_card(dark)
-        conn_card.pack(fill="x", padx=14, pady=(0, 10))
-
-        cr = ctk.CTkFrame(conn_card, fg_color="transparent")
-        cr.pack(fill="x", padx=12, pady=(10, 4))
-
-        self._conn_lbl = ctk.CTkLabel(cr, text="Scanning…",
-                                      font=ctk.CTkFont("Consolas", 14),
-                                      text_color=C_LABEL3)
+        # Right — connection status
+        cr = ctk.CTkFrame(bar, fg_color="transparent")
+        cr.pack(side="right", padx=18)
+        self._conn_dot = ctk.CTkLabel(cr, text="●", font=_font(11),
+                                      text_color=C_TEXT3)
+        self._conn_dot.pack(side="left", padx=(0, 4))
+        self._conn_lbl = ctk.CTkLabel(cr, text="NO SIGNAL",
+                                      font=_font(11), text_color=C_TEXT3)
         self._conn_lbl.pack(side="left")
+        self._conn_spinner = ctk.CTkLabel(cr, text="▼",
+                                          font=_font(10), text_color=C_TEXT3)
+        self._conn_spinner.pack(side="left", padx=(4, 0))
 
-        self._ip_lbl = ctk.CTkLabel(conn_card, text="Connect to Phantom WiFi",
-                                    font=ctk.CTkFont("Consolas", 13),
-                                    text_color=C_LABEL3, anchor="w")
-        self._ip_lbl.pack(fill="x", padx=12, pady=(0, 10))
+        # Bottom border
+        ctk.CTkFrame(self, fg_color=C_BORDER, height=1,
+                     corner_radius=0).pack(fill="x")
 
-        tk.Frame(dark, bg=C_BORDER, height=1).pack(fill="x", padx=16, pady=(0, 10))
+    # ── SIDEBAR ───────────────────────────────────────────────────────────────
+    def _build_sidebar(self, parent):
+        # Plain frame — NO scroll, fits content in fixed height
+        sc = ctk.CTkFrame(parent, fg_color=C_PANEL, corner_radius=0)
+        sc.pack(fill="both", expand=True)
 
-        # ── Select files ──────────────────────────────────────────────────────
-        ctk.CTkLabel(dark, text="◈  INPUT FILES",
-                     font=ctk.CTkFont("Consolas", 13),
-                     text_color=C_LABEL2, anchor="w"
-                     ).pack(fill="x", padx=16, pady=(0, 4))
+        # ── FAVORITES section ─────────────────────────────────────────────────
+        tg_sec(sc, "Favorites").pack(fill="x", padx=16, pady=(10, 3))
 
-        file_card = ios_card(dark)
-        file_card.pack(fill="x", padx=14, pady=(0, 10))
+        # Nav row with 3px left blue accent bar
+        nav_outer = ctk.CTkFrame(sc, fg_color=C_WHITE, corner_radius=8, height=36)
+        nav_outer.pack(fill="x", padx=8, pady=(0, 4))
+        nav_outer.pack_propagate(False)
+        ctk.CTkFrame(nav_outer, fg_color=C_BLUE, width=3, height=36,
+                     corner_radius=0).pack(side="left")
+        ctk.CTkLabel(nav_outer, text="🔒  Encrypt",
+                     font=_font(13, "bold"), text_color=C_TEXT,
+                     anchor="w").pack(side="left", padx=10)
 
-        list_bg = tk.Frame(file_card, bg=C_FILL3)
-        list_bg.pack(fill="x", padx=12, pady=(10, 4))
+        hr(sc, pady=4)
 
-        self._file_listbox = tk.Listbox(
-            list_bg, bg=C_FILL3, fg=C_LABEL,
-            selectbackground=C_BLUE, selectforeground="white",
-            font=("Consolas", 12), relief="flat", bd=0,
-            height=3, activestyle="none", highlightthickness=0)
-        self._file_listbox.pack(side="left", fill="both", expand=True, padx=4, pady=4)
+        # ── FILES section ─────────────────────────────────────────────────────
+        tg_sec(sc, "Files").pack(fill="x", padx=16, pady=(10, 4))
 
-        vsb_lb = tk.Scrollbar(list_bg, command=self._file_listbox.yview,
-                              bg=C_CARD, troughcolor=C_CARD,
-                              bd=0, highlightthickness=0, width=5)
-        vsb_lb.pack(side="right", fill="y")
-        self._file_listbox.configure(yscrollcommand=vsb_lb.set)
+        # Drop zone — all child widgets bound so any click triggers _browse()
+        _dz_browse = lambda e: self._browse()
+        self._dz = ctk.CTkFrame(sc, fg_color=C_SURFACE, corner_radius=10,
+                                border_color=C_TEXT3, border_width=2, height=76)
+        self._dz.pack(fill="x", padx=12, pady=(0, 3))
+        self._dz.pack_propagate(False)
+        dz_inner = ctk.CTkFrame(self._dz, fg_color="transparent")
+        dz_inner.place(relx=0.5, rely=0.5, anchor="center")
+        self._dz_icon  = ctk.CTkLabel(dz_inner, text="📄", font=_font(22))
+        self._dz_icon.pack()
+        self._dz_title = ctk.CTkLabel(dz_inner, text="Drop files here",
+                                      font=_font(11, "bold"), text_color=C_TEXT2)
+        self._dz_title.pack()
+        self._dz_sub   = ctk.CTkLabel(dz_inner, text="or click 'Add' to select files",
+                                      font=_font(9), text_color=C_TEXT3)
+        self._dz_sub.pack()
+        for w in (self._dz, dz_inner, self._dz_icon, self._dz_title, self._dz_sub):
+            w.bind("<Button-1>", _dz_browse)
 
-        btn_row = ctk.CTkFrame(file_card, fg_color="transparent")
-        btn_row.pack(fill="x", padx=10, pady=(0, 4))
+        # File list (shown when files added)
+        self._file_list_frame = ctk.CTkScrollableFrame(
+            sc, fg_color=C_INPUT, height=60,
+            scrollbar_button_color=C_BORDER,
+            scrollbar_button_hover_color=C_TEXT3,
+            corner_radius=8,
+            border_color=C_BORDER, border_width=1)
+        self._file_list_frame.pack(fill="x", padx=12, pady=(0, 3))
+        self._file_widgets: list = []
 
-        ios_btn(btn_row, "+ Add", self._browse, style="tinted",
-                height=32, font=ctk.CTkFont("Consolas", 12)
-                ).pack(side="left", padx=(0, 4))
-        ios_btn(btn_row, "Remove", self._remove_selected,
-                style="danger", height=32,
-                font=ctk.CTkFont("Consolas", 12)
-                ).pack(side="left", padx=(0, 4))
-        ios_btn(btn_row, "Clear", self._clear_files,
-                style="ghost", height=32,
-                font=ctk.CTkFont("Consolas", 12)
-                ).pack(side="left")
+        self._file_count_lbl = ctk.CTkLabel(
+            sc, text="No files selected",
+            font=_font(10), text_color=C_TEXT3, anchor="w")
+        self._file_count_lbl.pack(fill="x", padx=14, pady=(0, 4))
 
-        self._file_count_lbl = ctk.CTkLabel(file_card, text="No files selected",
-                                             font=ctk.CTkFont("Consolas", 13),
-                                             text_color=C_LABEL3, anchor="w")
-        self._file_count_lbl.pack(fill="x", padx=12, pady=(0, 8))
+        btn_row = ctk.CTkFrame(sc, fg_color="transparent")
+        btn_row.pack(fill="x", padx=12, pady=(0, 4))
+        btn_row.grid_columnconfigure((0, 1, 2), weight=1)
+        tg_btn(btn_row, "Add", self._browse, style="outline",
+               height=26, font=_font(10), corner_radius=20
+               ).grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        tg_btn(btn_row, "Remove", self._remove_selected, style="ghost",
+               height=26, font=_font(10), corner_radius=20
+               ).grid(row=0, column=1, sticky="ew", padx=(0, 3))
+        tg_btn(btn_row, "Clear", self._clear_files, style="ghost",
+               height=26, font=_font(10), corner_radius=20
+               ).grid(row=0, column=2, sticky="ew")
 
-        tk.Frame(dark, bg=C_BORDER, height=1).pack(fill="x", padx=16, pady=(0, 10))
+        hr(sc, pady=4)
 
-        # ── Key file ──────────────────────────────────────────────────────────
-        ctk.CTkLabel(dark, text="◈  KEY FILE (.key)",
-                     font=ctk.CTkFont("Consolas", 13),
-                     text_color=C_LABEL2, anchor="w"
-                     ).pack(fill="x", padx=16, pady=(0, 4))
+        # ── KEY section ───────────────────────────────────────────────────────
+        tg_sec(sc, "Key").pack(fill="x", padx=16, pady=(2, 3))
 
-        key_card = ios_card(dark)
-        key_card.pack(fill="x", padx=14, pady=(0, 10))
+        # Key drop zone — same style as file drop zone
+        _kz_browse = lambda e: self._browse_key()
+        self._kz = ctk.CTkFrame(sc, fg_color=C_SURFACE, corner_radius=10,
+                                border_color=C_TEXT3, border_width=2, height=60)
+        self._kz.pack(fill="x", padx=12, pady=(0, 3))
+        self._kz.pack_propagate(False)
+        kz_inner = ctk.CTkFrame(self._kz, fg_color="transparent")
+        kz_inner.place(relx=0.5, rely=0.5, anchor="center")
+        self._kz_icon  = ctk.CTkLabel(kz_inner, text="🔑", font=_font(18))
+        self._kz_icon.pack()
+        self._kz_title = ctk.CTkLabel(kz_inner, text="No key loaded",
+                                      font=_font(11, "bold"), text_color=C_TEXT3)
+        self._kz_title.pack()
+        for w in (self._kz, kz_inner, self._kz_icon, self._kz_title):
+            w.bind("<Button-1>", _kz_browse)
 
-        kr = ctk.CTkFrame(key_card, fg_color="transparent")
-        kr.pack(fill="x", padx=10, pady=(10, 4))
+        # Key action buttons
+        key_btn_row = ctk.CTkFrame(sc, fg_color="transparent")
+        key_btn_row.pack(fill="x", padx=12, pady=(0, 3))
+        key_btn_row.grid_columnconfigure((0, 1), weight=1)
+        tg_btn(key_btn_row, "Load Key", self._browse_key, style="outline",
+               height=26, font=_font(10), corner_radius=20
+               ).grid(row=0, column=0, sticky="ew", padx=(0, 3))
+        tg_btn(key_btn_row, "⟳ Generate", self._generate_key, style="ghost",
+               height=26, font=_font(10), corner_radius=20
+               ).grid(row=0, column=1, sticky="ew")
 
-        self._key_entry_var = ctk.StringVar()
-        ke = ctk.CTkEntry(kr, textvariable=self._key_entry_var,
-                          fg_color=C_FILL3, border_color=C_BORDER,
-                          border_width=1, text_color=C_LABEL,
-                          placeholder_text="No key loaded",
-                          placeholder_text_color=C_LABEL3,
-                          height=36, corner_radius=6,
-                          font=ctk.CTkFont("Consolas", 12))
-        ke.pack(side="left", fill="x", expand=True, padx=(0, 6))
+        self._key_status_lbl = ctk.CTkLabel(
+            sc, text="",
+            font=_font(10), text_color=C_TEXT3, anchor="w")
+        self._key_status_lbl.pack(fill="x", padx=14, pady=(0, 4))
 
-        ctk.CTkButton(kr, text="…", width=32, height=32,
-                      fg_color=C_FILL3, hover_color=C_SURFACE,
-                      border_color=C_BORDER, border_width=1,
-                      text_color=C_LABEL2, corner_radius=6,
-                      command=self._browse_key).pack(side="right")
+        # keep StringVar for internal use (unused visually now)
+        self._key_var = ctk.StringVar()
 
-        gen_row = ctk.CTkFrame(key_card, fg_color="transparent")
-        gen_row.pack(fill="x", padx=10, pady=(0, 4))
+        hr(sc, pady=4)
 
-        ios_btn(gen_row, "⟳ Generate New Key", self._generate_key,
-                style="ghost", height=32,
-                font=ctk.CTkFont("Consolas", 12)
-                ).pack(fill="x")
+        # ── ACTIONS section ───────────────────────────────────────────────────
+        tg_sec(sc, "Actions").pack(fill="x", padx=16, pady=(2, 4))
 
-        self._key_status_lbl = ctk.CTkLabel(key_card, text="",
-                                             font=ctk.CTkFont("Consolas", 13),
-                                             text_color=C_LABEL3, anchor="w")
-        self._key_status_lbl.pack(fill="x", padx=12, pady=(0, 8))
-
-        tk.Frame(dark, bg=C_BORDER, height=1).pack(fill="x", padx=16, pady=(0, 10))
-
-        # ── Encrypt button ────────────────────────────────────────────────────
-        self._enc_btn = ctk.CTkButton(
-            dark,
-            text="▶  RUN ENCRYPT",
-            font=ctk.CTkFont("Consolas", 16, "bold"),
-            fg_color=C_PURPLE, hover_color=C_PURPLE_D,
-            text_color="#010326",
-            height=42, corner_radius=8,
-            command=lambda: threading.Thread(
-                target=self._do_encrypt, daemon=True).start(),
+        self._enc_btn = tg_btn(
+            sc, "▶  Encrypt Files",
+            command=lambda: threading.Thread(target=self._do_encrypt, daemon=True).start(),
+            style="primary", height=40, font=_font(13, "bold"), corner_radius=20,
             state="normal" if _CRYPTO_OK else "disabled")
-        self._enc_btn.pack(fill="x", padx=14, pady=(0, 6))
+        self._enc_btn.pack(fill="x", padx=12, pady=(0, 5))
 
-        # Global progress bar
-        self._enc_pb = ctk.CTkProgressBar(dark, mode="determinate", height=3,
-                                          progress_color=C_PURPLE,
-                                          fg_color=C_FILL3, corner_radius=1)
-        self._enc_pb.set(0)
-        self._enc_pb.pack(fill="x", padx=14, pady=(0, 2))
-        self._enc_pb.pack_forget()
+        # Sub-buttons row
+        sub_row = ctk.CTkFrame(sc, fg_color="transparent")
+        sub_row.pack(fill="x", padx=12, pady=(0, 5))
+        sub_row.grid_columnconfigure((0, 1), weight=1)
+        self._save_btn = tg_btn(sub_row, "💾 Save", self._save_bin,
+                                style="outline", height=30, font=_font(10),
+                                corner_radius=20, state="disabled")
+        self._save_btn.grid(row=0, column=0, sticky="ew", padx=(0, 4))
+        self._send_btn = tg_btn(sub_row, "📤 Sync",
+                                command=lambda: threading.Thread(
+                                    target=self._do_send, daemon=True).start(),
+                                style="outline", height=30, font=_font(10),
+                                corner_radius=20, state="disabled")
+        self._send_btn.grid(row=0, column=1, sticky="ew")
 
-        self._enc_status_lbl = ctk.CTkLabel(
-            dark,
-            text="READY" if _CRYPTO_OK else "⚠  pip install cryptography",
-            font=ctk.CTkFont("Consolas", 13),
-            text_color=C_GREEN if _CRYPTO_OK else C_ORANGE,
-            anchor="w")
-        self._enc_status_lbl.pack(fill="x", padx=16, pady=(0, 4))
+        # Progress row
+        pr = ctk.CTkFrame(sc, fg_color="transparent")
+        pr.pack(fill="x", padx=12, pady=(3, 1))
+        ctk.CTkLabel(pr, text="OVERALL", font=_font(10), text_color=C_TEXT3,
+                     anchor="w").pack(side="left")
+        self._enc_pct = ctk.CTkLabel(pr, text="0 %",
+                                     font=_font(10, "bold"), text_color=C_TEXT)
+        self._enc_pct.pack(side="right")
 
-        # Send / Save row
-        sr = ctk.CTkFrame(dark, fg_color="transparent")
-        sr.pack(fill="x", padx=14, pady=(0, 4))
+        self._enc_bar = ctk.CTkProgressBar(sc, mode="determinate", height=4,
+                                           corner_radius=2,
+                                           progress_color=C_BLUE, fg_color=C_BORDER)
+        self._enc_bar.set(0)
+        self._enc_bar.pack(fill="x", padx=12, pady=(0, 4))
 
-        self._send_btn = ios_btn(sr, "📡  Send to Phantom",
-                                 command=lambda: threading.Thread(
-                                     target=self._do_send, daemon=True).start(),
-                                 style="tinted", height=36,
-                                 font=ctk.CTkFont("Consolas", 13),
-                                 state="disabled")
-        self._send_btn.pack(fill="x", pady=(0, 4))
+        self._enc_status = ctk.CTkLabel(
+            sc,
+            text="Ready" if _CRYPTO_OK else "⚠  pip install cryptography",
+            font=_font(10), anchor="w",
+            text_color=C_GREEN if _CRYPTO_OK else C_ORANGE)
+        self._enc_status.pack(fill="x", padx=14, pady=(0, 3))
 
-        self._save_btn = ios_btn(sr, "💾  Save .bin",
-                                 command=self._save_bin,
-                                 style="ghost", height=32,
-                                 font=ctk.CTkFont("Consolas", 12),
-                                 state="disabled")
-        self._save_btn.pack(fill="x")
+        # .bin filename shown in blue after encrypt
+        self._bundle_lbl = ctk.CTkLabel(sc, text="",
+                                        font=_font(10, "bold"), text_color=C_BLUE,
+                                        anchor="w", wraplength=215, justify="left")
+        self._bundle_lbl.pack(fill="x", padx=14, pady=(0, 4))
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # CONTENT — 3-layer visualizer + terminal log
-    # ─────────────────────────────────────────────────────────────────────────
+        # Sync status shown after send
+        self._sync_status_lbl = ctk.CTkLabel(sc, text="",
+                                             font=_font(10, "bold"), text_color=C_GREEN,
+                                             anchor="w", wraplength=215)
+        self._sync_status_lbl.pack(fill="x", padx=14, pady=(0, 2))
+
+        hr(sc, pady=8)
+
+        # Connection info
+        sec_hdr(sc, "Connection").pack(fill="x", padx=16, pady=(0, 6))
+        self._ip_lbl = ctk.CTkLabel(sc, text="Connect to Phantom WiFi",
+                                    font=_font(11), text_color=C_TEXT3, anchor="w",
+                                    wraplength=210, justify="left")
+        self._ip_lbl.pack(fill="x", padx=14, pady=(0, 16))
+
+    # ── CONTENT ───────────────────────────────────────────────────────────────
     def _build_content(self, parent):
-        dark_bg = ctk.CTkFrame(parent, fg_color=C_BG, corner_radius=0)
-        dark_bg.pack(fill="both", expand=True)
+        # Split content into left (engine) and right (phantom files) panes
+        parent.grid_rowconfigure(1, weight=1)
+        parent.grid_columnconfigure(0, weight=3)
+        parent.grid_columnconfigure(1, weight=0)
+        parent.grid_columnconfigure(2, weight=2)
 
-        # ── Top: 3 layer cards ───────────────────────────────────────────────
-        layers_row = ctk.CTkFrame(dark_bg, fg_color="transparent")
-        layers_row.pack(fill="x", padx=20, pady=(16, 10))
-        layers_row.grid_columnconfigure((0, 1, 2), weight=1)
+        # Sub-toolbar (42px, C_SURFACE bg) — spans full width
+        hdr = ctk.CTkFrame(parent, fg_color=C_SURFACE, height=42, corner_radius=0)
+        hdr.grid(row=0, column=0, columnspan=3, sticky="ew")
+        hdr.pack_propagate(False)
 
+        ctk.CTkLabel(hdr, text="ENCRYPTION ENGINE",
+                     font=_font(13, "bold"), text_color=C_TEXT).pack(side="left", padx=(14, 0))
+        ctk.CTkLabel(hdr, text="  ·  3-LAYER VISUALIZER",
+                     font=_font(12), text_color=C_SEC_HDR).pack(side="left")
+
+        # divider spanning full width
+        div = ctk.CTkFrame(parent, fg_color=C_BORDER, height=1, corner_radius=0)
+        div.grid(row=0, column=0, columnspan=3, sticky="sew")
+
+        # ── LEFT: engine panel ────────────────────────────────────────────────
+        left = ctk.CTkFrame(parent, fg_color=C_BG, corner_radius=0)
+        left.grid(row=1, column=0, sticky="nsew")
+        inner = ctk.CTkFrame(left, fg_color=C_BG, corner_radius=0)
+        inner.pack(fill="both", expand=True, padx=20, pady=16)
+
+        # ── vertical divider ──────────────────────────────────────────────────
+        ctk.CTkFrame(parent, fg_color=C_BORDER, width=1,
+                     corner_radius=0).grid(row=1, column=1, sticky="ns")
+
+        # ── RIGHT: phantom files panel ────────────────────────────────────────
+        right = ctk.CTkFrame(parent, fg_color=C_PANEL, corner_radius=0)
+        right.grid(row=1, column=2, sticky="nsew")
+        self._build_phantom_panel(right)
+
+        # ── 3 Layer Cards ─────────────────────────────────────────────────────
         _LAYERS = [
-            ("LAYER 1",  "AES-256-GCM",        "Initial block encrypt",     C_TEAL),
-            ("LAYER 2",  "HMAC-SHA256",          "Integrity authentication",  C_ORANGE),
-            ("LAYER 3",  "ChaCha20-Poly1305",    "Final stream encrypt",      C_PURPLE),
+            ("L1", "AES",  "AES-256-GCM",      "Authenticated block cipher",  C_TEAL,   "#EBF9FF"),
+            ("L2", "HMAC", "HMAC-SHA256",       "Integrity verification",      C_ORANGE, "#FFF6E5"),
+            ("L3", "CHA",  "ChaCha20-Poly1305", "Stream cipher wrap",          C_BLUE,   "#EBF1FF"),
         ]
+        lf = ctk.CTkFrame(inner, fg_color="transparent")
+        lf.pack(fill="x", pady=(0, 14))
+        lf.grid_columnconfigure((0, 1, 2), weight=1)
 
         self._layer_cards = []
-        for col, (layer_name, algo, desc, color) in enumerate(_LAYERS):
-            card = ctk.CTkFrame(layers_row, fg_color=C_CARD,
-                                corner_radius=12, border_color=C_BORDER,
-                                border_width=1)
+        for col, (lnum, lshort, algo, desc, color, tint) in enumerate(_LAYERS):
+            card = ctk.CTkFrame(lf, fg_color=C_CARD, corner_radius=12,
+                                border_color=C_BORDER, border_width=1)
             card.grid(row=0, column=col, sticky="nsew",
-                      padx=(0 if col == 0 else 8, 0))
+                      padx=(0 if col == 0 else 10, 0))
 
             top = ctk.CTkFrame(card, fg_color="transparent")
-            top.pack(fill="x", padx=14, pady=(12, 4))
-            ctk.CTkLabel(top, text=layer_name,
-                         font=ctk.CTkFont("Consolas", 15, "bold"),
-                         text_color=C_LABEL2).pack(side="left")
-            dot = ctk.CTkLabel(top, text="●",
-                               font=ctk.CTkFont("Consolas", 15),
-                               text_color=C_LABEL3)
+            top.pack(fill="x", padx=14, pady=(14, 4))
+            pill(top, lnum, color, tint).pack(side="left", padx=(0, 4))
+            pill(top, lshort, color, tint).pack(side="left")
+            dot = ctk.CTkLabel(top, text="●", font=_font(11), text_color=C_TEXT3)
             dot.pack(side="right")
 
-            ctk.CTkLabel(card, text=algo,
-                         font=ctk.CTkFont("Consolas", 16, "bold"),
-                         text_color=color).pack(anchor="w", padx=14, pady=(0, 2))
+            ctk.CTkLabel(card, text=algo, font=_font(15, "bold"),
+                         text_color=color).pack(anchor="w", padx=14, pady=(4, 2))
+            ctk.CTkLabel(card, text=desc, font=_font(11),
+                         text_color=C_TEXT2).pack(anchor="w", padx=14, pady=(0, 8))
 
-            ctk.CTkLabel(card, text=desc,
-                         font=ctk.CTkFont("Consolas", 13),
-                         text_color=C_LABEL2).pack(anchor="w", padx=14, pady=(0, 8))
+            hash_f = ctk.CTkFrame(card, fg_color=C_SURFACE, corner_radius=6)
+            hash_f.pack(fill="x", padx=14, pady=(0, 8))
+            hash_lbl = ctk.CTkLabel(hash_f, text="HASH ——",
+                                    font=_mono(10), text_color=C_TEXT3,
+                                    anchor="w", justify="left")
+            hash_lbl.pack(fill="x", padx=8, pady=5)
 
-            hash_lbl = ctk.CTkLabel(card, text="HASH: —",
-                                    font=ctk.CTkFont("Consolas", 12),
-                                    text_color=C_LABEL3,
-                                    wraplength=180, anchor="w", justify="left")
-            hash_lbl.pack(fill="x", padx=14, pady=(0, 6))
-
-            bar = ctk.CTkProgressBar(card, mode="determinate", height=2,
-                                     progress_color=color, fg_color=C_FILL3,
-                                     corner_radius=1)
+            bar = ctk.CTkProgressBar(card, mode="determinate", height=4,
+                                     progress_color=color, fg_color=C_BORDER,
+                                     corner_radius=2)
             bar.set(0)
-            bar.pack(fill="x", padx=14, pady=(0, 2))
+            bar.pack(fill="x", padx=14, pady=(0, 4))
 
-            pct = ctk.CTkLabel(card, text="0%",
-                               font=ctk.CTkFont("Consolas", 15),
+            pct = ctk.CTkLabel(card, text="0 %", font=_font(20, "bold"),
                                text_color=color, anchor="e")
-            pct.pack(fill="x", padx=14, pady=(0, 10))
+            pct.pack(fill="x", padx=14, pady=(0, 12))
 
             self._layer_cards.append((card, hash_lbl, bar, pct, dot, color))
 
-        # ── Global progress bar ───────────────────────────────────────────────
-        gbar_row = ctk.CTkFrame(dark_bg, fg_color="transparent")
-        gbar_row.pack(fill="x", padx=20, pady=(0, 4))
+        # ── Overall progress ──────────────────────────────────────────────────
+        op = ctk.CTkFrame(inner, fg_color="transparent")
+        op.pack(fill="x", pady=(0, 4))
+        ctk.CTkLabel(op, text="OVERALL PROGRESS",
+                     font=_font(11), text_color=C_TEXT2).pack(side="left")
+        self._enc_pct2 = ctk.CTkLabel(op, text="0 %",
+                                      font=_font(13, "bold"), text_color=C_TEXT)
+        self._enc_pct2.pack(side="right")
 
-        ctk.CTkLabel(gbar_row, text="OVERALL",
-                     font=ctk.CTkFont("Consolas", 15),
-                     text_color=C_LABEL).pack(side="left")
-
-        self._enc_gbar_pct = ctk.CTkLabel(gbar_row, text="0%",
-                                          font=ctk.CTkFont("Consolas", 16, "bold"),
-                                          text_color=C_PURPLE)
-        self._enc_gbar_pct.pack(side="right")
-
-        self._enc_gbar = ctk.CTkProgressBar(dark_bg, mode="determinate", height=4,
-                                            progress_color=C_PURPLE,
-                                            fg_color=C_FILL3, corner_radius=2)
-        self._enc_gbar.set(0)
-        self._enc_gbar.pack(fill="x", padx=20, pady=(0, 10))
+        self._enc_bar2 = ctk.CTkProgressBar(inner, mode="determinate",
+                                            height=4, corner_radius=2,
+                                            progress_color=C_BLUE, fg_color=C_BORDER)
+        self._enc_bar2.set(0)
+        self._enc_bar2.pack(fill="x", pady=(0, 14))
 
         # ── Terminal log ──────────────────────────────────────────────────────
-        log_hdr = ctk.CTkFrame(dark_bg, fg_color="transparent")
-        log_hdr.pack(fill="x", padx=20, pady=(0, 4))
+        log_hdr = ctk.CTkFrame(inner, fg_color="transparent")
+        log_hdr.pack(fill="x", pady=(0, 6))
 
-        ctk.CTkLabel(log_hdr, text="$ TERMINAL OUTPUT",
-                     font=ctk.CTkFont("Consolas", 14, "bold"),
-                     text_color=C_LABEL2).pack(side="left")
+        ctk.CTkLabel(log_hdr, text="TERMINAL OUTPUT",
+                     font=_font(11, "bold"), text_color=C_TEXT2).pack(side="left")
+        tg_btn(log_hdr, "CLR", self._clear_log,
+               style="ghost", height=24, width=48,
+               font=_font(10), corner_radius=20).pack(side="right")
 
-        ctk.CTkButton(log_hdr, text="CLEAR", width=60, height=24,
-                      font=ctk.CTkFont("Consolas", 12),
-                      fg_color=C_FILL3, hover_color=C_SURFACE,
-                      text_color=C_LABEL2, corner_radius=4,
-                      command=self._clear_log).pack(side="right")
+        self.log = ctk.CTkTextbox(
+            inner,
+            fg_color=C_SURFACE, text_color=C_TEXT, font=_mono(11),
+            corner_radius=8, border_color=C_BORDER, border_width=1,
+            wrap="word",
+            scrollbar_button_color=C_BORDER,
+            scrollbar_button_hover_color=C_TEXT3,
+            activate_scrollbars=True)
+        self.log.pack(fill="both", expand=True)
+        self.log.configure(state="disabled")
 
-        # Bundle info label
-        self._bundle_lbl = ctk.CTkLabel(dark_bg, text="",
-                                        font=ctk.CTkFont("Consolas", 13),
-                                        text_color=C_TEAL, anchor="w")
-        self._bundle_lbl.pack(fill="x", padx=20, pady=(0, 4))
+    # ── PHANTOM PANEL (right) ─────────────────────────────────────────────────
+    def _build_phantom_panel(self, parent):
+        tg_sec(parent, "Phantom").pack(fill="x", padx=14, pady=(14, 6))
+        ctk.CTkLabel(parent, text="Synced files",
+                     font=_font(10), text_color=C_TEXT3, anchor="w"
+                     ).pack(fill="x", padx=14, pady=(0, 8))
+        hr(parent, pady=2)
+        self._phantom_list = ctk.CTkScrollableFrame(
+            parent, fg_color="transparent",
+            scrollbar_button_color=C_BORDER,
+            scrollbar_button_hover_color=C_TEXT3,
+            corner_radius=0)
+        self._phantom_list.pack(fill="both", expand=True, padx=0, pady=0)
+        self._phantom_rows: list = []
 
-        log_outer = tk.Frame(dark_bg, bg=C_CARD)
-        log_outer.pack(fill="both", expand=True, padx=18, pady=(0, 16))
+    def _phantom_add_file(self, filename: str, size_kb: float):
+        """Add a row to the phantom panel for a just-synced file."""
+        row = ctk.CTkFrame(self._phantom_list, fg_color=C_CARD, corner_radius=8,
+                           border_color=C_BORDER, border_width=1)
+        row.pack(fill="x", padx=10, pady=4)
+        # icon + name
+        top = ctk.CTkFrame(row, fg_color="transparent")
+        top.pack(fill="x", padx=10, pady=(8, 2))
+        ctk.CTkLabel(top, text="📦", font=_font(13)).pack(side="left", padx=(0, 6))
+        ctk.CTkLabel(top, text=filename, font=_font(11, "bold"),
+                     text_color=C_BLUE, anchor="w").pack(side="left", fill="x", expand=True)
+        # size + check badge
+        bot = ctk.CTkFrame(row, fg_color="transparent")
+        bot.pack(fill="x", padx=10, pady=(0, 8))
+        ctk.CTkLabel(bot, text=f"{size_kb:.1f} KB",
+                     font=_font(10), text_color=C_TEXT3, anchor="w").pack(side="left")
+        ctk.CTkLabel(bot, text="✓ synced", font=_font(10, "bold"),
+                     text_color=C_GREEN).pack(side="right")
+        self._phantom_rows.append(row)
 
-        self.log = tk.Text(
-            log_outer, font=("Consolas", 13),
-            bg=C_CARD, fg=C_LABEL,
-            relief="flat", bd=0,
-            state="disabled", wrap="word",
-            highlightthickness=0,
-            selectbackground=C_SURFACE,
-            padx=14, pady=10,
-            insertbackground=C_GREEN)
+    # ── FILE LIST ─────────────────────────────────────────────────────────────
+    def _refresh_file_list(self, uploaded: set = None):
+        """Render file list. Files in `uploaded` set shown in blue, others black."""
+        for w in self._file_widgets: w.destroy()
+        self._file_widgets.clear()
+        uploaded = uploaded or set()
+        for i, p in enumerate(self._selected_files):
+            row = ctk.CTkFrame(self._file_list_frame,
+                               fg_color=C_SURFACE if i % 2 == 0 else C_CARD,
+                               corner_radius=3)
+            row.pack(fill="x", pady=1)
+            name = os.path.basename(p)
+            color = C_BLUE if name in uploaded else C_TEXT
+            ctk.CTkLabel(row, text=f"  {name}",
+                         font=_font(11), text_color=color,
+                         anchor="w").pack(side="left", fill="x", expand=True, pady=3)
+            self._file_widgets.append(row)
 
-        vsb = tk.Scrollbar(log_outer, orient="vertical",
-                           command=self.log.yview,
-                           bg=C_CARD, troughcolor=C_CARD,
-                           bd=0, highlightthickness=0, width=5)
-        self.log.configure(yscrollcommand=vsb.set)
-        vsb.pack(side="right", fill="y", pady=4)
-        self.log.pack(side="left", fill="both", expand=True)
-
-        self.log.tag_config("ok",     foreground=C_GREEN)
-        self.log.tag_config("err",    foreground=C_RED)
-        self.log.tag_config("info",   foreground=C_ORANGE)
-        self.log.tag_config("dim",    foreground=C_LABEL2)
-        self.log.tag_config("head",   foreground=C_PURPLE,
-                            font=("Consolas", 13, "bold"))
-        self.log.tag_config("prompt", foreground=C_LABEL2)
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # LAYER ANIMATION
-    # ─────────────────────────────────────────────────────────────────────────
-    def _animate_layer(self, layer_idx: int, hash_hex: str,
-                       duration_ms: int, on_done):
-        card, hash_lbl, bar, pct, dot, color = self._layer_cards[layer_idx]
-        steps    = 40
-        interval = max(20, duration_ms // steps)
-        start_overall = layer_idx / 3.0
-
-        dot.configure(text="●", text_color=color)
-        short = hash_hex[:16] + "…" if len(hash_hex) > 16 else hash_hex
-        hash_lbl.configure(text=f"HASH: {short}", text_color=color)
+    # ── LAYER ANIMATION ───────────────────────────────────────────────────────
+    def _animate_layer(self, idx, hash_hex, duration_ms, on_done):
+        card, hash_lbl, bar, pct, dot, color = self._layer_cards[idx]
+        steps = 40; interval = max(20, duration_ms // steps)
+        start = idx / 3.0
+        dot.configure(text="◌", text_color=color)
+        hash_lbl.configure(text=f"HASH  {hash_hex[:12]}…", text_color=color)
 
         def _tick(step=0):
             if step > steps:
-                bar.set(1.0)
-                pct.configure(text="100%")
-                dot.configure(text="✓", text_color=color)
-                hash_lbl.configure(
-                    text=f"HASH: {hash_hex[:32]}…" if len(hash_hex) > 32
-                    else f"HASH: {hash_hex}",
-                    text_color=color)
-                done_overall = (layer_idx + 1) / 3.0
-                self._enc_gbar.set(done_overall)
-                self._enc_gbar_pct.configure(text=f"{int(done_overall*100)}%")
-                on_done()
-                return
+                bar.set(1.0); pct.configure(text="100 %")
+                dot.configure(text="●", text_color=color)
+                hash_lbl.configure(text=f"HASH  {hash_hex[:24]}…", text_color=color)
+                self._set_ov((idx + 1) / 3.0); on_done(); return
             frac = step / steps
-            bar.set(frac)
-            pct.configure(text=f"{int(frac*100)}%")
-            g = start_overall + frac / 3.0
-            self._enc_gbar.set(g)
-            self._enc_gbar_pct.configure(text=f"{int(g*100)}%")
+            bar.set(frac); pct.configure(text=f"{int(frac*100)} %")
+            self._set_ov(start + frac / 3.0)
             self.after(interval, lambda: _tick(step + 1))
-
         _tick()
 
+    def _set_ov(self, v):
+        txt = f"{int(v*100)} %"
+        self._enc_bar.set(v);  self._enc_pct.configure(text=txt)
+        self._enc_bar2.set(v); self._enc_pct2.configure(text=txt)
+
     def _reset_layers(self):
-        for (card, hash_lbl, bar, pct, dot, color) in self._layer_cards:
-            bar.set(0)
-            pct.configure(text="0%", text_color=color)
-            dot.configure(text="●", text_color=C_LABEL3)
-            hash_lbl.configure(text="HASH: —", text_color=C_LABEL3)
-        self._enc_gbar.set(0)
-        self._enc_gbar_pct.configure(text="0%", text_color=C_PURPLE)
+        for card, hash_lbl, bar, pct, dot, color in self._layer_cards:
+            bar.set(0); pct.configure(text="0 %", text_color=color)
+            dot.configure(text="●", text_color=C_TEXT3)
+            hash_lbl.configure(text="HASH ——", text_color=C_TEXT3)
+        self._set_ov(0)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # MAIN ENCRYPT RUNNER
-    # ─────────────────────────────────────────────────────────────────────────
-    def _do_encrypt(self):
-        if not self._selected_files:
-            self.after(0, lambda: self._enc_status_lbl.configure(
-                text="⚠  NO FILES SELECTED", text_color=C_ORANGE)); return
-        if not _CRYPTO_OK:
-            self.after(0, lambda: self._enc_status_lbl.configure(
-                text="⚠  pip install cryptography", text_color=C_ORANGE)); return
-        if not self._key_bytes:
-            self.after(0, lambda: self._enc_status_lbl.configure(
-                text="⚠  NO KEY FILE", text_color=C_ORANGE)); return
-
-        files = list(self._selected_files)
-        master = self._key_bytes
-
-        self.after(0, self._reset_layers)
-        self.after(0, self._clear_log)
-        self.after(0, lambda: self._enc_btn.configure(state="disabled"))
-        self.after(0, lambda: self._send_btn.configure(state="disabled"))
-        self.after(0, lambda: self._save_btn.configure(state="disabled"))
-        self.after(0, lambda: self._enc_status_lbl.configure(
-            text="RUNNING…", text_color=C_TEAL))
-        self.after(0, lambda: self._bundle_lbl.configure(text=""))
-
-        def _run():
-            self._log_msg("═" * 52)
-            self._log_msg(f"  FILES  : {len(files)} file(s)")
-            self._log_msg(f"  KEY    : {os.path.basename(self._key_path)}")
-            self._log_msg("═" * 52)
-            time.sleep(0.3)
-
-            # Derive sub-keys
-            try:
-                k_aes, k_hmac, k_chacha = _phtm_derive(master)
-                h_aes    = hashlib.sha256(k_aes   ).hexdigest()
-                h_hmac   = hashlib.sha256(k_hmac  ).hexdigest()
-                h_chacha = hashlib.sha256(k_chacha).hexdigest()
-            except Exception as e:
-                self._log_msg(f"✗  KEY DERIVE ERROR: {e}")
-                self.after(0, lambda: self._enc_status_lbl.configure(
-                    text=f"ERROR: {e}", text_color=C_RED))
-                self.after(0, lambda: self._enc_btn.configure(state="normal"))
-                return
-
-            # Layer 1 — AES-256-GCM
-            self._log_msg("\n[LAYER 1]  AES-256-GCM  —  initial block encrypt")
-            time.sleep(0.2)
-            l1_done = threading.Event()
-            self.after(0, lambda: self._animate_layer(0, h_aes, 5000, l1_done.set))
-            l1_done.wait()
-            self._log_msg(f"    ✓  AES-256 key hash  : {h_aes[:32]}…")
-            time.sleep(0.3)
-
-            # Layer 2 — HMAC-SHA256
-            self._log_msg("\n[LAYER 2]  HMAC-SHA256  —  integrity authentication")
-            time.sleep(0.2)
-            l2_done = threading.Event()
-            self.after(0, lambda: self._animate_layer(1, h_hmac, 6000, l2_done.set))
-            l2_done.wait()
-            self._log_msg(f"    ✓  HMAC key hash     : {h_hmac[:32]}…")
-            time.sleep(0.3)
-
-            # Layer 3 — ChaCha20
-            self._log_msg("\n[LAYER 3]  ChaCha20-Poly1305  —  final stream encrypt")
-            time.sleep(0.2)
-            l3_done = threading.Event()
-            self.after(0, lambda: self._animate_layer(2, h_chacha, 5000, l3_done.set))
-            l3_done.wait()
-            self._log_msg(f"    ✓  ChaCha20 key hash : {h_chacha[:32]}…")
-            time.sleep(0.3)
-
-            # Actual encryption
-            self._log_msg("\n[OUTPUT]  Building encrypted bundle…")
-            try:
-                zip_buf = io.BytesIO()
-                with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
-                    for fpath in files:
-                        fname = os.path.basename(fpath)
-                        self._log_msg(f"    Encrypting: {fname}")
-                        raw = open(fpath, "rb").read()
-                        enc = _phtm_encrypt_3layer(raw, master)
-                        zf.writestr(fname + ".enc", enc)
-                        self._log_msg(f"    ✓  {len(raw):,} → {len(enc):,} bytes")
-
-                zip_bytes  = zip_buf.getvalue()
-                bin_bytes  = _phtm_pack_bin(zip_bytes)
-                md5_str    = hashlib.md5(bin_bytes).hexdigest()
-                ts         = time.strftime("%Y%m%d_%H%M%S")
-                bundle_name = f"phantom_{ts}"
-
-                self._bin_bytes   = bin_bytes
-                self._bundle_name = bundle_name
-
-                size_kb = len(bin_bytes) / 1024
-                info = (f"📦  {bundle_name}.bin  ·  {size_kb:.1f} KB  "
-                        f"·  {len(files)} file(s)")
-                self._log_msg("═" * 52)
-                self._log_msg(f"✔  DONE  {bundle_name}.bin")
-                self._log_msg(f"    SIZE : {size_kb:.1f} KB")
-                self._log_msg(f"    MD5  : {md5_str}")
-                self._log_msg("═" * 52)
-
-                self.after(0, lambda i=info: self._bundle_lbl.configure(text=i))
-                self.after(0, lambda: self._enc_status_lbl.configure(
-                    text=f"DONE  {len(files)} FILE(S) ENCRYPTED",
-                    text_color=C_GREEN))
-                self.after(0, lambda: self._send_btn.configure(state="normal"))
-                self.after(0, lambda: self._save_btn.configure(state="normal"))
-                self._show_toast(f"✓  Encrypted {len(files)} file(s)  {size_kb:.1f} KB")
-
-            except Exception as e:
-                self._log_msg(f"✗  ENCRYPT ERROR: {e}")
-                self.after(0, lambda: self._enc_status_lbl.configure(
-                    text=f"ERROR: {e}", text_color=C_RED))
-
-            self.after(0, lambda: self._enc_btn.configure(state="normal"))
-
-        threading.Thread(target=_run, daemon=True).start()
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SAVE .bin
-    # ─────────────────────────────────────────────────────────────────────────
-    def _save_bin(self):
-        if not self._bin_bytes: return
-        path = filedialog.asksaveasfilename(
-            defaultextension=".bin",
-            initialfile=self._bundle_name + ".bin",
-            filetypes=[("Binary file", "*.bin"), ("All files", "*.*")])
-        if path:
-            open(path, "wb").write(self._bin_bytes)
-            self._log(f"✓  Saved: {path}", "ok")
-            self._show_toast(f"✓  Saved {os.path.basename(path)}")
-
-    # ─────────────────────────────────────────────────────────────────────────
-    # SEND → Phantom
-    # ─────────────────────────────────────────────────────────────────────────
-    def _do_send(self):
-        if not self._bin_bytes:
-            self._log("No bundle — run Encrypt first", "warn"); return
-        ip = self._active_ip
-        if not ip:
-            self._log("Not connected to Phantom", "warn"); return
-
-        fname = self._bundle_name + ".bin"
-        data  = self._bin_bytes
-
-        self.after(0, lambda: (
-            self._send_btn.configure(state="disabled"),
-            self._enc_status_lbl.configure(
-                text=f"Sending {len(data)/1024:.1f} KB…", text_color=C_TEAL)
-        ))
-        self._log(f"[Send] {fname}  {len(data)//1024} KB → {self._active_name}…", "head")
-
-        t0 = time.time()
-        resp, sent = tcp_upload(ip, TCP_PORT, data, filename=fname)
-        elapsed = time.time() - t0
-
-        status_line = resp.split("\r\n")[0] if resp else ""
-        body = resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
-        spiffs_ok = True
-        try:
-            rj = json.loads(body)
-            spiffs_ok = rj.get("spiffs_saved", rj.get("ok", True))
+    # ── LOG ───────────────────────────────────────────────────────────────────
+    def _log(self, msg):
+        def _do():
+            self.log.configure(state="normal")
+            self.log.insert("end", f"  ›  {msg}\n")
+            self.log.configure(state="disabled")
+            self.log.see("end")
+        try: self.after(0, _do)
         except: pass
 
-        http_ok = "200" in status_line or "201" in status_line or '"ok"' in resp
-        success = http_ok and "ERROR" not in resp and spiffs_ok
+    def _log_msg(self, msg): self._log(msg)
 
-        self.after(0, lambda: self._send_btn.configure(state="normal"))
+    def _clear_log(self):
+        self.log.configure(state="normal")
+        self.log.delete("1.0", "end")
+        self.log.configure(state="disabled")
+        self._reset_layers()
 
-        if success:
-            msg = f"✓  Sent  {sent//1024:.0f} KB  ({elapsed:.1f}s)"
-            self.after(0, lambda m=msg: self._enc_status_lbl.configure(
-                text=m, text_color=C_GREEN))
-            self._log(msg, "ok")
-            self._show_toast(msg)
-        elif not spiffs_ok:
-            msg = "⚠  Storage full on Phantom"
-            self.after(0, lambda m=msg: self._enc_status_lbl.configure(
-                text=m, text_color=C_ORANGE))
-            self._log(msg, "warn")
-            self._show_toast(msg, error=True)
-        else:
-            msg = f"✗  Send failed ({status_line})"
-            self.after(0, lambda m=msg: self._enc_status_lbl.configure(
-                text=m, text_color=C_RED))
-            self._log(f"✗  {resp[:200]}", "err")
-            self._show_toast(msg, error=True)
+    # ── TOAST ─────────────────────────────────────────────────────────────────
+    def _show_toast(self, msg, error=False):
+        c = C_RED if error else C_GREEN
+        t = ctk.CTkFrame(self, fg_color=C_CARD, corner_radius=12,
+                         border_color=c, border_width=1)
+        t.place(relx=0.5, y=54, anchor="n")
+        ctk.CTkLabel(t, text=msg, font=_font(12, "bold"),
+                     text_color=c, padx=22, pady=9).pack()
+        self.after(3000, t.destroy)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # FILE SELECTION
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── FILE OPS ──────────────────────────────────────────────────────────────
     def _browse(self):
         paths = filedialog.askopenfilenames(
             title="Select files to encrypt",
-            filetypes=[
-                ("All supported",
-                 "*.wav *.mp3 *.ogg *.flac *.aac "
-                 "*.doc *.docx *.xls *.xlsx *.pdf "
-                 "*.jpg *.jpeg *.png *.gif *.bmp *.webp "
-                 "*.txt *.csv *.json *.bin"),
-                ("Audio",    "*.wav *.mp3 *.ogg *.flac *.aac"),
-                ("Document", "*.doc *.docx *.xls *.xlsx *.pdf *.txt *.csv"),
-                ("Image",    "*.jpg *.jpeg *.png *.gif *.bmp *.webp"),
-                ("All files", "*.*"),
-            ])
+            filetypes=[("All supported",
+                        "*.wav *.mp3 *.ogg *.flac *.aac "
+                        "*.doc *.docx *.xls *.xlsx *.pdf "
+                        "*.jpg *.jpeg *.png *.gif *.bmp *.webp "
+                        "*.txt *.csv *.json *.bin"),
+                       ("All files", "*.*")])
         if paths:
-            added = 0
-            for p in paths:
-                if p not in self._selected_files:
-                    self._selected_files.append(p)
-                    self._file_listbox.insert("end", os.path.basename(p))
-                    added += 1
-            self._update_file_count()
+            added = sum(1 for p in paths
+                        if p not in self._selected_files
+                        and not self._selected_files.append(p))
+            self._refresh_file_list(); self._update_count()
             if added:
-                self._log(f"Added {added} file(s)", "ok")
+                self._log(f"Added {added} file(s)")
                 self._reset_bundle()
+                self._flash_dropzone(added)
 
     def _remove_selected(self):
-        for idx in reversed(self._file_listbox.curselection()):
-            self._file_listbox.delete(idx)
-            del self._selected_files[idx]
-        self._update_file_count()
-        self._reset_bundle()
+        if self._selected_files:
+            r = self._selected_files.pop()
+            self._refresh_file_list(); self._update_count()
+            self._log(f"Removed: {os.path.basename(r)}"); self._reset_bundle()
 
     def _clear_files(self):
-        self._file_listbox.delete(0, "end")
         self._selected_files.clear()
-        self._update_file_count()
-        self._reset_bundle()
+        self._refresh_file_list(); self._update_count(); self._reset_bundle()
 
-    def _update_file_count(self):
+    def _update_count(self):
         n = len(self._selected_files)
         self._file_count_lbl.configure(
             text=f"{n} file(s) selected" if n else "No files selected",
-            text_color=C_LABEL2 if n else C_LABEL3)
+            text_color=C_TEXT if n else C_TEXT3)
 
     def _reset_bundle(self):
         self._bin_bytes = None
         self._bundle_lbl.configure(text="")
+        self._sync_status_lbl.configure(text="")
         self._save_btn.configure(state="disabled")
         self._send_btn.configure(state="disabled")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # KEY MANAGEMENT
-    # ─────────────────────────────────────────────────────────────────────────
+    # ── KEY ZONE FLASH ────────────────────────────────────────────────────────
+    def _flash_key_zone(self, name: str):
+        """Flash key zone green to confirm key loaded."""
+        self._kz.configure(border_color=C_GREEN)
+        self._kz_icon.configure(text="✓")
+        self._kz_title.configure(text=name, text_color=C_GREEN)
+        def _restore():
+            self._kz.configure(border_color=C_BORDER_HI)
+            self._kz_icon.configure(text="🔑")
+            self._kz_title.configure(text=name, text_color=C_BLUE)
+        self.after(1800, _restore)
+
+    # ── DROP ZONE FLASH ───────────────────────────────────────────────────────
+    def _flash_dropzone(self, count: int):
+        """Flash drop zone border green then back to normal."""
+        self._dz.configure(border_color=C_GREEN)
+        self._dz_icon.configure(text="✓")
+        self._dz_title.configure(text=f"{count} file(s) added", text_color=C_GREEN)
+        self._dz_sub.configure(text="")
+        def _restore():
+            self._dz.configure(border_color=C_TEXT3)
+            self._dz_icon.configure(text="📄")
+            n = len(self._selected_files)
+            self._dz_title.configure(
+                text=f"{n} file(s) ready" if n else "Drop files here",
+                text_color=C_TEXT2)
+            self._dz_sub.configure(text="or click 'Add' to select files")
+        self.after(1800, _restore)
+
+    # ── KEY ───────────────────────────────────────────────────────────────────
     def _browse_key(self):
-        path = filedialog.askopenfilename(
-            title="Select key file",
+        path = filedialog.askopenfilename(title="Select key file",
             filetypes=[("Key file", "*.key"), ("All files", "*.*")])
         if not path: return
         try:
             master = _phtm_load_key(path)
             pub_fp = hashlib.sha256(master).hexdigest()
-            self._key_path   = path
-            self._key_bytes  = master
-            self._key_pub_fp = pub_fp
-            short = os.path.basename(path)
+            self._key_path = path; self._key_bytes = master; self._key_pub_fp = pub_fp
             last4 = pub_fp[-4:].upper()
-            self._key_entry_var.set(short)
-            self._key_status_lbl.configure(
-                text=f"✓  Key ready  […{last4}]", text_color=C_GREEN)
-            self._log(f"Key loaded: {short}  […{last4}]", "ok")
+            name = os.path.basename(path)
+            self._key_var.set(name)
+            self._key_status_lbl.configure(text=f"✓  […{last4}]", text_color=C_GREEN)
+            self._log(f"Key loaded: {name}  […{last4}]")
             self._reset_bundle()
+            self._flash_key_zone(name)
         except Exception as e:
             self._key_bytes = None
             self._key_status_lbl.configure(text=f"✗  {e}", text_color=C_RED)
-            self._log(f"Key error: {e}", "err")
 
     def _generate_key(self):
-        path = filedialog.asksaveasfilename(
-            title="Save new key file",
-            defaultextension=".key",
-            initialfile="phantom.key",
+        path = filedialog.asksaveasfilename(title="Save new key file",
+            defaultextension=".key", initialfile="phantom.key",
             filetypes=[("Key file", "*.key"), ("All files", "*.*")])
         if not path: return
         try:
             out, pub_fp = generate_key_file(path)
-            master      = _phtm_load_key(out)
-            self._key_path   = out
-            self._key_bytes  = master
-            self._key_pub_fp = pub_fp
+            master = _phtm_load_key(out)
+            self._key_path = out; self._key_bytes = master; self._key_pub_fp = pub_fp
             last4 = pub_fp[-4:].upper()
-            short = os.path.basename(out)
-            self._key_entry_var.set(short)
-            self._key_status_lbl.configure(
-                text=f"✓  Key ready  […{last4}]", text_color=C_GREEN)
-            self._log(f"Generated: {short}  […{last4}]", "ok")
-            self._show_toast(f"✓  Key saved: {short}")
+            name = os.path.basename(out)
+            self._key_var.set(name)
+            self._key_status_lbl.configure(text=f"✓  […{last4}]", text_color=C_GREEN)
+            self._log(f"Generated: {name}  […{last4}]")
+            self._show_toast(f"✓  Key saved: {name}")
             self._reset_bundle()
+            self._flash_key_zone(name)
         except Exception as e:
-            self._log(f"Generate key error: {e}", "err")
+            self._log(f"Generate error: {e}")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # SPINNER / DETECT
-    # ─────────────────────────────────────────────────────────────────────────
-    _SPIN = ["◌", "◍", "●", "◍"]
-
-    def _start_spinner(self):
-        self._spinning = True
-        self._tick_spinner()
-
+    # ── SPINNER ───────────────────────────────────────────────────────────────
+    _SPIN = ["◌", "◍", "◎", "◍"]
+    def _start_spinner(self): self._spinning = True; self._tick_spinner()
     def _tick_spinner(self):
         if not self._spinning: return
         self._spin_angle = (self._spin_angle + 1) % 4
@@ -993,82 +824,240 @@ class App(ctk.CTk):
         self.after(350, self._tick_spinner)
 
     def _poll_detect(self):
-        prev_ips: set = set()
+        prev: set = set()
         while True:
             results = scan_phantoms()
-            cur_ips = {r[0] for r in results}
-            if cur_ips != prev_ips:
-                prev_ips = cur_ips
-                self.after(0, self._on_scan_result, results)
+            cur = {r[0] for r in results}
+            if cur != prev: prev = cur; self.after(0, self._on_scan_result, results)
             if not results and self._active_ip:
-                self._active_ip = ""; self._active_name = ""
-                self.after(0, self._on_scan_result, [])
+                self._active_ip = ""; self.after(0, self._on_scan_result, [])
             time.sleep(4)
 
-    def _on_scan_result(self, results: list):
+    def _on_scan_result(self, results):
         if not results:
-            self._conn_lbl.configure(text="Scanning…", text_color=C_LABEL3)
+            self._conn_lbl.configure(text="NO SIGNAL", text_color=C_TEXT3)
+            self._conn_dot.configure(text_color=C_TEXT3)
             self._ip_lbl.configure(text="Connect to Phantom WiFi")
-            self._status_dot.configure(text_color=C_ORANGE)
-            self._conn_spinner.configure(text="◌", text_color=C_LABEL3)
-            self._active_ip = ""; self._active_name = ""
-            return
+            self._active_ip = ""; self._active_name = ""; return
         ip, nm, l4, _ = results[0]
-        self._active_ip   = ip
-        self._active_name = nm
-        self._conn_lbl.configure(text=f"{nm} connected", text_color=C_GREEN)
-        self._ip_lbl.configure(text=f"IP: {ip}")
-        self._status_dot.configure(text_color=C_GREEN)
-        self._conn_spinner.configure(text="●", text_color=C_GREEN)
-        self._log(f"Detected: {nm}  ({ip})", "ok")
+        self._active_ip = ip; self._active_name = nm
+        self._conn_lbl.configure(text=f"{nm}  ONLINE", text_color=C_GREEN)
+        self._conn_dot.configure(text_color=C_GREEN)
+        self._ip_lbl.configure(text=f"{ip}  ·  KEY …{l4}")
+        self._conn_spinner.configure(text="▼", text_color=C_TEXT3)
+        self._log(f"Detected: {nm}")
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # LOG HELPERS
-    # ─────────────────────────────────────────────────────────────────────────
-    def _log_msg(self, msg: str):
-        def _append():
-            self.log.config(state="normal")
-            self.log.insert("end", "> ", "prompt")
-            if msg.startswith("    ✓") or msg.startswith("✔"):
-                tag = "ok"
-            elif msg.startswith("    ✗") or "ERROR" in msg:
-                tag = "err"
-            elif msg.startswith("["):
-                tag = "info"
-            elif msg.startswith("─") or msg.startswith("═"):
-                tag = "head"
-            else:
-                tag = "dim"
-            self.log.insert("end", msg + "\n", tag)
-            self.log.see("end")
-            self.log.config(state="disabled")
-        self.after(0, _append)
+    # ── SAVE ──────────────────────────────────────────────────────────────────
+    def _save_bin(self):
+        if not self._bin_bytes: return
+        path = filedialog.asksaveasfilename(
+            defaultextension=".bin", initialfile=self._bundle_name + ".bin",
+            filetypes=[("Binary", "*.bin"), ("All files", "*.*")])
+        if path:
+            open(path, "wb").write(self._bin_bytes)
+            # self._log(f"✓  Saved: {os.path.basename(path)}")
+            # self._show_toast(f"✓  Saved {os.path.basename(path)}")
 
-    def _log(self, msg, tag="dim"):
-        def _do():
-            self.log.config(state="normal")
-            self.log.insert("end", ">  ", "prompt")
-            self.log.insert("end", f"{msg}\n", tag)
-            self.log.see("end")
-            self.log.config(state="disabled")
-        try: self.after(0, _do)
+    # ── SEND / SYNC ───────────────────────────────────────────────────────────
+    def _do_send(self):
+        if not self._bin_bytes:
+            self._log("No bundle — run Encrypt first"); return
+        if not self._active_ip:
+            self._log("Not connected to Phantom"); return
+        fname = self._bundle_name + ".bin"; data = self._bin_bytes
+        size_kb = len(data) / 1024
+        self.after(0, lambda: (
+            self._send_btn.configure(state="disabled"),
+            self._sync_status_lbl.configure(text=""),
+            self._enc_status.configure(
+                text=f"Syncing {size_kb:.1f} KB…", text_color=C_BLUE)))
+        # Animate sync progress bar (indeterminate feel via steps)
+        self._sync_progress(0)
+        t0 = time.time()
+        resp, sent = tcp_upload(self._active_ip, TCP_PORT, data, filename=fname)
+        elapsed = time.time() - t0
+        sl = resp.split("\r\n")[0] if resp else ""
+        body = resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in resp else ""
+        spiffs_ok = True
+        try:
+            rj = json.loads(body); spiffs_ok = rj.get("spiffs_saved", rj.get("ok", True))
         except: pass
+        ok = ("200" in sl or "201" in sl or '"ok"' in resp) and "ERROR" not in resp and spiffs_ok
+        self.after(0, lambda: self._send_btn.configure(state="normal"))
+        if ok:
+            msg = f"✓  Sync complete  ·  {sent//1024:.0f} KB  ({elapsed:.1f}s)"
+            _key_name = os.path.basename(self._key_path) if self._key_path else ""
+            self.after(0, lambda m=msg: (
+                self._enc_status.configure(text=m, text_color=C_GREEN),
+                self._sync_status_lbl.configure(text="✓  Complete", text_color=C_GREEN)))
+            # Show key filename in entry after successful sync
+            if _key_name:
+                self.after(0, lambda k=_key_name: self._key_var.set(k))
+            # Mark all selected files as uploaded (blue)
+            _uploaded = {os.path.basename(p) for p in self._selected_files}
+            self.after(0, lambda u=_uploaded: self._refresh_file_list(u))
+            # Add file card to phantom panel
+            self.after(0, lambda: self._phantom_add_file(fname, size_kb))
+            self._show_toast(msg)
+        elif not spiffs_ok:
+            msg = "⚠  Storage full"
+            self.after(0, lambda m=msg: self._enc_status.configure(text=m, text_color=C_ORANGE))
+            self._show_toast(msg, error=True)
+        else:
+            msg = f"✗  Sync failed ({sl})"
+            self.after(0, lambda m=msg: self._enc_status.configure(text=m, text_color=C_RED))
+            self._show_toast(msg, error=True)
 
-    def _clear_log(self):
-        self.log.config(state="normal")
-        self.log.delete("1.0", "end")
-        self.log.config(state="disabled")
-        self._reset_layers()
+    def _sync_progress(self, step):
+        """Animate the overall progress bar 0→100% during sync."""
+        if step > 40: return
+        self._set_ov(step / 40.0)
+        self.after(80, lambda: self._sync_progress(step + 1))
 
-    def _show_toast(self, msg, error=False):
-        border = C_RED if error else C_GREEN
-        fg     = C_RED if error else C_GREEN
-        t = ctk.CTkFrame(self, fg_color=C_CARD, corner_radius=20,
-                         border_color=border, border_width=1)
-        t.place(relx=0.5, y=60, anchor="n")
-        ctk.CTkLabel(t, text=msg, font=ctk.CTkFont("Consolas", 14, "bold"),
-                     text_color=fg, padx=24, pady=10).pack()
-        self.after(3000, t.destroy)
+    # ── ENCRYPT ───────────────────────────────────────────────────────────────
+    def _do_encrypt(self):
+        if not self._selected_files:
+            self.after(0, lambda: self._enc_status.configure(
+                text="⚠  No files selected", text_color=C_ORANGE)); return
+        if not _CRYPTO_OK:
+            self.after(0, lambda: self._enc_status.configure(
+                text="⚠  pip install cryptography", text_color=C_ORANGE)); return
+        if not self._key_bytes:
+            self.after(0, lambda: self._enc_status.configure(
+                text="⚠  No key file loaded", text_color=C_ORANGE)); return
+
+        files = list(self._selected_files); master = self._key_bytes
+        self.after(0, self._reset_layers)
+        self.after(0, self._clear_log)
+        self.after(0, lambda: self._enc_btn.configure(state="disabled"))
+        self.after(0, lambda: self._send_btn.configure(state="disabled"))
+        self.after(0, lambda: self._save_btn.configure(state="disabled"))
+        self.after(0, lambda: self._enc_status.configure(text="Running…", text_color=C_BLUE))
+        self.after(0, lambda: self._bundle_lbl.configure(text=""))
+
+        def _run():
+            self._log_msg("══════════════════════════════════════")
+            self._log_msg(f"  FILES  : {len(files)} file(s)")
+            self._log_msg(f"  KEY    : {os.path.basename(self._key_path)}")
+            self._log_msg("══════════════════════════════════════")
+            time.sleep(0.3)
+            try:
+                k_aes, k_hmac, k_chacha = _phtm_derive(master)
+                h_aes    = hashlib.sha256(k_aes   ).hexdigest()
+                h_hmac   = hashlib.sha256(k_hmac  ).hexdigest()
+                h_chacha = hashlib.sha256(k_chacha).hexdigest()
+            except Exception as e:
+                self._log_msg(f"✗  KEY DERIVE ERROR: {e}")
+                self.after(0, lambda: self._enc_status.configure(
+                    text=f"Error: {e}", text_color=C_RED))
+                self.after(0, lambda: self._enc_btn.configure(state="normal")); return
+
+            for idx, (hx, label) in enumerate([
+                (h_aes,    "[L1]  AES-256-GCM  —  block encrypt"),
+                (h_hmac,   "[L2]  HMAC-SHA256  —  integrity"),
+                (h_chacha, "[L3]  ChaCha20     —  stream encrypt"),
+            ]):
+                self._log_msg(f"\n{label}")
+                time.sleep(0.2)
+                ev = threading.Event()
+                self.after(0, lambda i=idx, h=hx: self._animate_layer(i, h, 5000, ev.set))
+                ev.wait(); time.sleep(0.25)
+
+            self._log_msg("\n[OUT]  Building encrypted bundle…")
+            try:
+                zip_buf = io.BytesIO()
+                with zipfile.ZipFile(zip_buf, "w", zipfile.ZIP_DEFLATED, compresslevel=6) as zf:
+                    for fpath in files:
+                        fname = os.path.basename(fpath)
+                        self._log_msg(f"  ›  {fname}")
+                        raw = open(fpath, "rb").read()
+                        enc = _phtm_encrypt_3layer(raw, master)
+                        zf.writestr(fname + ".enc", enc)
+                        self._log_msg(f"  ✓  {len(raw):,} → {len(enc):,} bytes")
+
+                zip_bytes   = zip_buf.getvalue()
+                bin_bytes   = _phtm_pack_bin(zip_bytes)
+                md5_str     = hashlib.md5(bin_bytes).hexdigest()
+                ts          = time.strftime("%Y%m%d_%H%M%S")
+                bundle_name = f"phantom_{ts}"
+                self._bin_bytes = bin_bytes; self._bundle_name = bundle_name
+                size_kb = len(bin_bytes) / 1024
+
+                # ── AUTO-SAVE to output/ folder next to encode.py ─────────────
+                _script_dir = os.path.dirname(os.path.abspath(__file__))
+                out_dir     = os.path.join(_script_dir, "output")
+                os.makedirs(out_dir, exist_ok=True)
+                auto_path   = os.path.join(out_dir, bundle_name + ".bin")
+                _save_ok    = False
+                try:
+                    with open(auto_path, "wb") as _f:
+                        _f.write(bin_bytes)
+                    _save_ok = True
+                    # self._log_msg(f"  💾  Saved → {auto_path}")
+                except Exception as _se:
+                    self._log_msg(f"  ⚠  Auto-save error: {_se}")
+                save_info = f"📦  {bundle_name}.bin  ·  {size_kb:.1f} KB"
+
+                self._log_msg("══════════════════════════════════════")
+                self._log_msg(f"  DONE   {bundle_name}.bin")
+                self._log_msg(f"  SIZE : {size_kb:.1f} KB")
+                self._log_msg(f"  MD5  : {md5_str}")
+                # self._log_msg(f"  PATH : {auto_path}")
+                self._log_msg("══════════════════════════════════════")
+                self.after(0, lambda i=save_info: self._bundle_lbl.configure(text=i))
+                self.after(0, lambda: self._enc_status.configure(
+                    text=f"Done — {len(files)} file(s) encrypted", text_color=C_GREEN))
+                self.after(0, lambda: self._send_btn.configure(state="normal"))
+                self.after(0, lambda: self._save_btn.configure(state="normal"))
+                self._show_toast(f"✓  Saved → output/{bundle_name}.bin")
+                # ── AUTO-SEND after 20s countdown ────────────────────────────
+                if self._active_ip:
+                    for _remaining in range(20, 0, -1):
+                        self.after(0, lambda r=_remaining: self._enc_status.configure(
+                            text=f"Auto-upload in {r}s…", text_color=C_BLUE))
+                        time.sleep(1)
+                    # After countdown, run the send logic inline (same as _do_send but non-blocking)
+                    _fname = self._bundle_name + ".bin"
+                    _data  = self._bin_bytes
+                    _ip    = self._active_ip
+                    if _data and _ip:
+                        self.after(0, lambda: self._send_btn.configure(state="disabled"))
+                        self.after(0, lambda: self._enc_status.configure(
+                            text=f"Auto-sending {len(_data)/1024:.1f} KB…", text_color=C_BLUE))
+                        _t0 = time.time()
+                        _resp, _sent = tcp_upload(_ip, TCP_PORT, _data, filename=_fname)
+                        _elapsed = time.time() - _t0
+                        _sl   = _resp.split("\r\n")[0] if _resp else ""
+                        _body = _resp.split("\r\n\r\n", 1)[1] if "\r\n\r\n" in _resp else ""
+                        _spiffs_ok = True
+                        try:
+                            import json as _json
+                            _rj = _json.loads(_body)
+                            _spiffs_ok = _rj.get("spiffs_saved", _rj.get("ok", True))
+                        except: pass
+                        _ok = ("200" in _sl or "201" in _sl or '"ok"' in _resp) and "ERROR" not in _resp and _spiffs_ok
+                        self.after(0, lambda: self._send_btn.configure(state="normal"))
+                        if _ok:
+                            _msg = f"✓  Auto-sent  {_sent//1024:.0f} KB  ({_elapsed:.1f}s)"
+                            self.after(0, lambda m=_msg: self._enc_status.configure(text=m, text_color=C_GREEN))
+                            self._show_toast(_msg)
+                        elif not _spiffs_ok:
+                            _msg = "⚠  Storage full"
+                            self.after(0, lambda m=_msg: self._enc_status.configure(text=m, text_color=C_ORANGE))
+                            self._show_toast(_msg, error=True)
+                        else:
+                            _msg = f"✗  Auto-send failed ({_sl})"
+                            self.after(0, lambda m=_msg: self._enc_status.configure(text=m, text_color=C_RED))
+                            self._show_toast(_msg, error=True)
+                else:
+                    self._log_msg("ℹ  No device connected — skipping auto-upload")
+            except Exception as e:
+                self._log_msg(f"✗  ERROR: {e}")
+                self.after(0, lambda: self._enc_status.configure(
+                    text=f"Error: {e}", text_color=C_RED))
+            self.after(0, lambda: self._enc_btn.configure(state="normal"))
+
+        threading.Thread(target=_run, daemon=True).start()
 
 
 if __name__ == "__main__":
